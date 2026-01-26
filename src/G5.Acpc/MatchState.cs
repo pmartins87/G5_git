@@ -80,7 +80,7 @@ namespace G5.Acpc
             if (numPlayers == 2)
             {
                 // Small blind is button in HU
-                if (position == Position.Button || position == Position.SmallBlind)
+                if (position == Position.BU || position == Position.SB)
                     pos = 1;
                 else
                     pos = 0;
