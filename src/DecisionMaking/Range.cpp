@@ -4,6 +4,7 @@
 #include "PreFlopEquity.h"
 #include <algorithm>
 #include <cstring>
+#include <stdexcept>
 #include <mmintrin.h>
 #include <emmintrin.h>
 
@@ -84,25 +85,26 @@ namespace G5Cpp
 
     void Range::normalize()
     {
+        float sum = 0.0f;
+
+        for (int i = 0; i < _length; i++)
+        {
+            if (!_finite(_likelihood[i]) || _likelihood[i] < 0.0f)
+                _likelihood[i] = 0.0f;
+
+            sum += _likelihood[i];
+        }
+
+        assert(sum > 0.0f);
+
+        if (sum <= 0.0f)
+            throw std::runtime_error("Range::normalize: zero probability mass after range update");
+
+        float norm_float = 1.0f / sum;
+
         if (USE_SSE)
         {
             int length4 = (_length / 4) * 4;
-            __m128 sum = _mm_set1_ps(0.0f);
-
-            for (int i = 0; i < length4; i+=4)
-            {
-                sum = _mm_add_ps(sum, _mm_loadu_ps(&_likelihood[i]));
-            }
-
-            //float sum_float1 = sum.m128_f32[0] + sum.m128_f32[1] + sum.m128_f32[2] + sum.m128_f32[3];
-            float sum_float = M128_getByIndex(sum, 0) + M128_getByIndex(sum, 1) + M128_getByIndex(sum, 2) + M128_getByIndex(sum, 3);
-
-            for (int i = length4; i < _length; i++)
-            {
-                sum_float += _likelihood[i];
-            }
-
-            float norm_float = 1.0f / sum_float;
             __m128 norm = _mm_set1_ps(norm_float);
 
             for (int i = 0; i < length4; i+=4)
@@ -117,19 +119,9 @@ namespace G5Cpp
         }
         else
         {
-            float sum = 0;
-
             for (int i = 0; i < _length; i++)
             {
-                sum += _likelihood[i];
-            }
-
-            assert (sum != 0);
-            float norm = 1 / sum;
-
-            for (int i = 0; i < _length; i++)
-            {
-                _likelihood[i] *= norm;
+                _likelihood[i] *= norm_float;
             }
         }
     }
@@ -276,6 +268,11 @@ namespace G5Cpp
 
         float sum = toCheck + toBet;
 
+        assert(sum > 0.0f);
+
+        if (sum <= 0.0f || !_finite(sum))
+            throw std::runtime_error("Range::predictAction_CheckBet: invalid predictive probability mass");
+
         toCheck /= sum;
         toBet /= sum;
     }
@@ -297,6 +294,11 @@ namespace G5Cpp
 
         float sum = toFold + toCall + toRaise;
 
+        assert(sum > 0.0f);
+
+        if (sum <= 0.0f || !_finite(sum))
+            throw std::runtime_error("Range::predictAction_FoldCallRaise: invalid predictive probability mass");
+
         toFold /= sum;
         toCall /= sum;
         toRaise /= sum;
@@ -306,7 +308,7 @@ namespace G5Cpp
     {
         float cumulHandChance = 0.0f;
         float nextCumulHandChance = 0.0f;
-        int lastIndex;
+        int lastIndex = -1;
 
         for (int j = 0; j < _length; j++)
         {
@@ -328,7 +330,10 @@ namespace G5Cpp
             }
         }
 
-        assert (lastIndex >= nIndices - 1);
+        assert(lastIndex >= nIndices - 1);
+
+        if (lastIndex < nIndices - 1)
+            throw std::runtime_error("Range::fillHandIndices: insufficient probability mass to fill sampling table");
     }
 
     void Range::actionProbDist_CheckBet(float* checkDist, float* betDist, int numHands, Street street, float betChance)

@@ -20,7 +20,7 @@ if errorlevel 1 (
 
 git --version >nul 2>nul
 if errorlevel 1 (
-    echo ERRO: Git nao encontrado no Windows.
+    echo ERRO: Git nao encontrado.
     echo Instale o Git for Windows antes de continuar.
     pause
     exit /b 1
@@ -38,7 +38,7 @@ if not exist ".git" (
 
 echo.
 echo ==========================================
-echo        CONFIGURANDO REPOSITORIO REMOTO
+echo        CONFIGURANDO REMOTO
 echo ==========================================
 
 git remote get-url origin >nul 2>nul
@@ -46,6 +46,11 @@ if errorlevel 1 (
     echo Adicionando origin:
     echo %REMOTE_URL%
     git remote add origin "%REMOTE_URL%"
+    if errorlevel 1 (
+        echo ERRO ao adicionar origin.
+        pause
+        exit /b 1
+    )
 ) else (
     for /f "delims=" %%u in ('git remote get-url origin') do set "CURRENT_REMOTE=%%u"
 
@@ -54,11 +59,11 @@ if errorlevel 1 (
     echo.
 
     if /I not "!CURRENT_REMOTE!"=="%REMOTE_URL%" (
-        echo Trocando origin para:
+        echo Alterando origin para:
         echo %REMOTE_URL%
         git remote set-url origin "%REMOTE_URL%"
         if errorlevel 1 (
-            echo ERRO ao alterar o repositorio remoto.
+            echo ERRO ao alterar origin.
             pause
             exit /b 1
         )
@@ -67,18 +72,23 @@ if errorlevel 1 (
 
 echo.
 echo ==========================================
-echo        CONFIGURANDO BRANCH LOCAL
+echo        CONFIGURANDO BRANCH
 echo ==========================================
 
 for /f "delims=" %%b in ('git branch --show-current') do set "CURRENT_BRANCH=%%b"
 
-if "%CURRENT_BRANCH%"=="" (
+if "!CURRENT_BRANCH!"=="" (
     echo Nenhum branch atual detectado. Criando branch %BRANCH%...
     git checkout -b %BRANCH%
+    if errorlevel 1 (
+        echo ERRO ao criar branch %BRANCH%.
+        pause
+        exit /b 1
+    )
 ) else (
-    echo Branch atual: %CURRENT_BRANCH%
+    echo Branch atual: !CURRENT_BRANCH!
 
-    if /I not "%CURRENT_BRANCH%"=="%BRANCH%" (
+    if /I not "!CURRENT_BRANCH!"=="%BRANCH%" (
         echo Renomeando branch atual para %BRANCH%...
         git branch -M %BRANCH%
         if errorlevel 1 (
@@ -96,7 +106,7 @@ echo ==========================================
 
 git diff --name-only --diff-filter=U | findstr . >nul
 if not errorlevel 1 (
-    echo ERRO: Existem conflitos pendentes no repositorio.
+    echo ERRO: existem conflitos pendentes.
     echo Resolva os conflitos antes de sincronizar.
     echo.
     git status
@@ -106,7 +116,7 @@ if not errorlevel 1 (
 
 echo.
 echo ==========================================
-echo        STATUS ANTES DO COMMIT
+echo        STATUS ATUAL
 echo ==========================================
 git status
 echo.
@@ -114,6 +124,7 @@ echo.
 echo ==========================================
 echo        ADICIONANDO ALTERACOES LOCAIS
 echo ==========================================
+
 git add -A
 if errorlevel 1 (
     echo ERRO ao adicionar arquivos.
@@ -121,21 +132,29 @@ if errorlevel 1 (
     exit /b 1
 )
 
+echo.
+echo ==========================================
+echo        STATUS APOS GIT ADD
+echo ==========================================
+git status
+echo.
+
 git diff --cached --quiet
 if errorlevel 1 (
     echo.
     set /p commit_msg="Descreva a alteracao feita: "
 
-    if "%commit_msg%"=="" (
+    if "!commit_msg!"=="" (
         set "commit_msg=Atualizacao do projeto G5"
     )
 
     echo.
     echo Criando commit local...
-    git commit -m "%commit_msg%"
+    git commit -m "!commit_msg!"
     if errorlevel 1 (
+        echo.
         echo ERRO ao criar commit.
-        echo Verifique se seu nome/e-mail do Git estao configurados.
+        echo Verifique a mensagem do Git acima.
         pause
         exit /b 1
     )
@@ -150,28 +169,25 @@ echo ==========================================
 
 git ls-remote --exit-code --heads origin %BRANCH% >nul 2>nul
 if errorlevel 1 (
-    echo O branch remoto ainda nao existe ou o repositorio esta vazio.
-    echo Pulando download inicial.
+    echo O branch remoto %BRANCH% ainda nao existe.
+    echo Pulando download.
 ) else (
-    echo Baixando e mesclando alteracoes remotas...
-    git pull --no-rebase origin %BRANCH%
+    echo Baixando alteracoes remotas...
+    git pull --no-rebase --no-edit origin %BRANCH%
 
     if errorlevel 1 (
         echo.
-        echo ERRO: houve conflito ou falha ao baixar alteracoes.
-        echo.
-        echo O Git tentou juntar o que esta no PC com o que esta no GitHub,
-        echo mas encontrou conflito que precisa de decisao manual.
+        echo ERRO: houve conflito ou falha no pull.
         echo.
         echo Arquivos em conflito:
         git diff --name-only --diff-filter=U
         echo.
-        echo Abra esses arquivos no Visual Studio, resolva os conflitos,
-        echo depois rode:
+        echo Resolva os conflitos no Visual Studio.
+        echo Depois rode:
         echo.
         echo git add -A
         echo git commit -m "Resolve conflitos"
-        echo git push -u origin %BRANCH%
+        echo git push
         echo.
         pause
         exit /b 1
@@ -188,10 +204,10 @@ if errorlevel 1 (
     echo.
     echo ERRO: o push falhou.
     echo Possiveis causas:
-    echo - Falha de login no GitHub
-    echo - Token/senha expirado
+    echo - Falha de autenticacao no GitHub
+    echo - Token expirado
     echo - Branch protegido
-    echo - Alteracoes remotas novas apareceram durante o processo
+    echo - Alteracoes remotas novas apareceram durante o envio
     echo.
     pause
     exit /b 1
@@ -201,7 +217,9 @@ echo.
 echo ==========================================
 echo        SINCRONIZACAO CONCLUIDA
 echo ==========================================
-echo Repositorio sincronizado com:
+echo Repositorio:
 echo %REMOTE_URL%
+echo.
+git status
 echo.
 pause
