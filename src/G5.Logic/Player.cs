@@ -189,6 +189,15 @@ namespace G5.Logic
 
         public void CutRange(ActionType actionType, Street currentStreet, Board board, float betRaiseChance, float checkCallChance, DecisionMakingContext dmContext)
         {
+            if (currentStreet == Street.PreFlop)
+            {
+                TableType tableType = (Model != null) ? Model.TableType : TableType.SixMax;
+                int numPlayers = (tableType == TableType.HeadsUp) ? 2 : 6;
+
+                Range.CutPreFlopAction(actionType, PreFlopPosition, tableType, numPlayers, betRaiseChance, checkCallChance);
+                return;
+            }
+
             if (actionType == ActionType.Check || actionType == ActionType.Bet)
             {
                 Range.CutCheckBet(actionType, currentStreet, board, betRaiseChance, dmContext);

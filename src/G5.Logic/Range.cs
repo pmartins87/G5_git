@@ -43,6 +43,26 @@ namespace G5.Logic
             public bool Forced { get; set; }
         }
 
+        private enum PreFlopActionBucket
+        {
+            Fold = 0,
+            CheckCall = 1,
+            BetRaise = 2
+        }
+
+        private struct PreFlopComboFeatures
+        {
+            public float Score;
+            public float Playability;
+            public float Pairness;
+            public float Suitedness;
+            public float Connectivity;
+            public float Broadway;
+            public float AceHigh;
+            public float Wheel;
+            public float DominationRisk;
+        }
+
         public EquityPair[] Data { get; private set; }
         public List<CuttingParamsT> CuttingParams { get; private set; }
         public List<Card> HeroHoleCards { get; private set; }
@@ -79,6 +99,10 @@ namespace G5.Logic
                 Data[i].Ind = oldRange.Data[i].Ind;
                 Data[i].Equity = oldRange.Data[i].Equity;
             }
+
+            CuttingParams = new List<CuttingParamsT>(oldRange.CuttingParams);
+            HeroHoleCards = new List<Card>(oldRange.HeroHoleCards);
+            Board = new Board(oldRange.Board);
         }
 
         public void Reset()
@@ -145,11 +169,16 @@ namespace G5.Logic
 
             for (var i = 0; i < N_HOLECARDS; i++)
             {
+                if (float.IsNaN(Data[i].Equity) || float.IsInfinity(Data[i].Equity) || Data[i].Equity < 0.0f)
+                    Data[i].Equity = 0.0f;
+
                 sum += Data[i].Equity;
             }
 
-            Debug.Assert(sum != 0);
-            var norm = (sum != 0) ? (1 / sum) : 1;
+            if (sum <= 0.0f)
+                throw new InvalidOperationException("Range.Normalize: massa probabilistica zerada. O corte de range anterior eliminou todos os combos validos.");
+
+            var norm = 1.0f / sum;
 
             for (var i = 0; i < N_HOLECARDS; i++)
             {
@@ -182,6 +211,314 @@ namespace G5.Logic
             });
 
             DecisionMakingDll.CutRange_FoldCallRaise(this, actionType, street, board, raiseChance, callChance, dmContext);
+        }
+
+        /// <summary>
+        /// Preflop range update by exact-combo likelihood.
+        ///
+        /// Important: before a player acts, a dealt hand is uniformly random. Therefore this method must be
+        /// called only after an observed preflop action. It applies Bayes' rule:
+        ///
+        ///     P(h | action) proportional to P(action | h, model, position) * P(h)
+        ///
+        /// The action likelihood is combo-specific and then calibrated so that the weighted population
+        /// average matches the player's modeled ActionDistribution for the current spot.
+        /// </summary>
+        public void CutPreFlopAction(ActionType actionType, Position position, TableType tableType, int numPlayers,
+            float betRaiseChance, float checkCallChance)
+        {
+            bool forced = !(actionType == ActionType.Check || actionType == ActionType.Bet);
+
+            CuttingParams.Add(new CuttingParamsT
+            {
+                ActionType = actionType,
+                Street = Street.PreFlop,
+                Value1 = betRaiseChance,
+                Value2 = checkCallChance,
+                Forced = forced
+            });
+
+            if (actionType == ActionType.Fold)
+                return;
+
+            float foldTarget;
+            float checkCallTarget;
+            float betRaiseTarget;
+
+            BuildTargets(actionType, betRaiseChance, checkCallChance, out foldTarget, out checkCallTarget, out betRaiseTarget);
+
+            float[] foldProb = new float[N_HOLECARDS];
+            float[] checkCallProb = new float[N_HOLECARDS];
+            float[] betRaiseProb = new float[N_HOLECARDS];
+
+            BuildPreFlopActionModel(position, tableType, numPlayers, foldTarget, checkCallTarget, betRaiseTarget,
+                foldProb, checkCallProb, betRaiseProb);
+
+            PreFlopActionBucket observedBucket = ActionToBucket(actionType);
+
+            for (int i = 0; i < N_HOLECARDS; i++)
+            {
+                float likelihood;
+
+                if (observedBucket == PreFlopActionBucket.BetRaise)
+                    likelihood = betRaiseProb[i];
+                else if (observedBucket == PreFlopActionBucket.CheckCall)
+                    likelihood = checkCallProb[i];
+                else
+                    likelihood = foldProb[i];
+
+                Data[i].Equity *= likelihood;
+            }
+
+            Normalize();
+        }
+
+        private static void BuildTargets(ActionType actionType, float betRaiseChance, float checkCallChance,
+            out float foldTarget, out float checkCallTarget, out float betRaiseTarget)
+        {
+            betRaiseTarget = ClampProbability(betRaiseChance);
+
+            if (actionType == ActionType.Check || actionType == ActionType.Bet)
+            {
+                foldTarget = 0.0f;
+                checkCallTarget = 1.0f - betRaiseTarget;
+                return;
+            }
+
+            checkCallTarget = ClampProbability(checkCallChance);
+            float sum = betRaiseTarget + checkCallTarget;
+
+            if (sum > 1.0f)
+            {
+                betRaiseTarget /= sum;
+                checkCallTarget /= sum;
+                foldTarget = 0.0f;
+            }
+            else
+            {
+                foldTarget = 1.0f - sum;
+            }
+        }
+
+        private void BuildPreFlopActionModel(Position position, TableType tableType, int numPlayers,
+            float foldTarget, float checkCallTarget, float betRaiseTarget,
+            float[] foldProb, float[] checkCallProb, float[] betRaiseProb)
+        {
+            const float eps = 1.0e-6f;
+
+            for (int i = 0; i < N_HOLECARDS; i++)
+            {
+                if (Data[i].Equity <= 0.0f)
+                {
+                    foldProb[i] = eps;
+                    checkCallProb[i] = eps;
+                    betRaiseProb[i] = eps;
+                    continue;
+                }
+
+                HoleCards hc = Data[i].GetHoleCards();
+                PreFlopComboFeatures f = EvaluatePreFlopCombo(hc);
+
+                float positionPressure = PositionTightness(position, tableType, numPlayers);
+
+                double raiseLogit =
+                    -5.25 +
+                    10.80 * f.Score +
+                    2.80 * f.Pairness +
+                    1.25 * f.Broadway +
+                    0.95 * f.AceHigh +
+                    0.65 * f.Suitedness +
+                    0.45 * f.Connectivity -
+                    1.55 * f.DominationRisk -
+                    1.35 * positionPressure;
+
+                double callLogit =
+                    -2.60 +
+                    5.25 * f.Playability +
+                    1.65 * f.Suitedness +
+                    1.25 * f.Connectivity +
+                    0.95 * f.Pairness +
+                    0.55 * f.Wheel -
+                    2.25 * Math.Max(0.0f, f.Score - 0.80f) -
+                    0.65 * positionPressure;
+
+                double foldLogit =
+                    1.10 +
+                    5.75 * (1.0f - f.Playability) +
+                    1.70 * f.DominationRisk +
+                    0.75 * positionPressure -
+                    1.10 * f.Pairness;
+
+                double maxLogit = Math.Max(foldLogit, Math.Max(callLogit, raiseLogit));
+                double fb = Math.Exp(foldLogit - maxLogit) + eps;
+                double cb = Math.Exp(callLogit - maxLogit) + eps;
+                double rb = Math.Exp(raiseLogit - maxLogit) + eps;
+                double sum = fb + cb + rb;
+
+                foldProb[i] = (float)(fb / sum);
+                checkCallProb[i] = (float)(cb / sum);
+                betRaiseProb[i] = (float)(rb / sum);
+            }
+
+            CalibrateActionProbabilities(foldTarget, checkCallTarget, betRaiseTarget, foldProb, checkCallProb, betRaiseProb);
+        }
+
+        private void CalibrateActionProbabilities(float foldTarget, float checkCallTarget, float betRaiseTarget,
+            float[] foldProb, float[] checkCallProb, float[] betRaiseProb)
+        {
+            const float eps = 1.0e-6f;
+
+            for (int iteration = 0; iteration < 32; iteration++)
+            {
+                float currentFold = 0.0f;
+                float currentCheckCall = 0.0f;
+                float currentBetRaise = 0.0f;
+
+                for (int i = 0; i < N_HOLECARDS; i++)
+                {
+                    float w = Data[i].Equity;
+                    currentFold += w * foldProb[i];
+                    currentCheckCall += w * checkCallProb[i];
+                    currentBetRaise += w * betRaiseProb[i];
+                }
+
+                float foldScale = (foldTarget + eps) / (currentFold + eps);
+                float checkCallScale = (checkCallTarget + eps) / (currentCheckCall + eps);
+                float betRaiseScale = (betRaiseTarget + eps) / (currentBetRaise + eps);
+
+                for (int i = 0; i < N_HOLECARDS; i++)
+                {
+                    float f = Math.Max(eps, foldProb[i] * foldScale);
+                    float c = Math.Max(eps, checkCallProb[i] * checkCallScale);
+                    float r = Math.Max(eps, betRaiseProb[i] * betRaiseScale);
+                    float sum = f + c + r;
+
+                    foldProb[i] = f / sum;
+                    checkCallProb[i] = c / sum;
+                    betRaiseProb[i] = r / sum;
+                }
+            }
+        }
+
+        private static PreFlopComboFeatures EvaluatePreFlopCombo(HoleCards hc)
+        {
+            int r0 = (int)hc.Card0.rank;
+            int r1 = (int)hc.Card1.rank;
+
+            int hi = Math.Max(r0, r1);
+            int lo = Math.Min(r0, r1);
+
+            bool pair = hi == lo;
+            bool suited = hc.Card0.suit == hc.Card1.suit;
+            int gap = pair ? 0 : Math.Max(0, hi - lo - 1);
+
+            float hiNorm = NormalizeRank(hi);
+            float loNorm = NormalizeRank(lo);
+            float rankMass = (0.68f * hiNorm) + (0.32f * loNorm);
+
+            float pairness = pair ? (0.45f + 0.55f * hiNorm) : 0.0f;
+            float suitedness = (!pair && suited) ? 1.0f : 0.0f;
+            float connectivity = pair ? 0.0f : (float)Math.Exp(-0.62 * gap);
+            float broadway = (hi >= 10 && lo >= 10) ? 1.0f : 0.0f;
+            float aceHigh = (hi == 14) ? 1.0f : 0.0f;
+            float wheel = (!pair && hi == 14 && lo <= 5) ? 1.0f : 0.0f;
+            float lowTrash = (!pair && hi <= 9 && lo <= 6 && !suited && gap >= 2) ? 1.0f : 0.0f;
+            float dominationRisk = (!pair && hi >= 11 && lo <= 8 && !suited) ? (1.0f - loNorm) : lowTrash;
+
+            float playability =
+                (0.42f * rankMass) +
+                (0.18f * pairness) +
+                (0.15f * suitedness) +
+                (0.13f * connectivity) +
+                (0.08f * broadway) +
+                (0.05f * wheel) -
+                (0.12f * dominationRisk);
+
+            float score =
+                (0.56f * rankMass) +
+                (0.24f * pairness) +
+                (0.07f * suitedness) +
+                (0.05f * connectivity) +
+                (0.07f * broadway) +
+                (0.05f * aceHigh) -
+                (0.08f * dominationRisk);
+
+            return new PreFlopComboFeatures
+            {
+                Score = Clamp01(score),
+                Playability = Clamp01(playability),
+                Pairness = Clamp01(pairness),
+                Suitedness = suitedness,
+                Connectivity = Clamp01(connectivity),
+                Broadway = broadway,
+                AceHigh = aceHigh,
+                Wheel = wheel,
+                DominationRisk = Clamp01(dominationRisk)
+            };
+        }
+
+        private static float PositionTightness(Position position, TableType tableType, int numPlayers)
+        {
+            if (tableType == TableType.HeadsUp || numPlayers <= 2)
+            {
+                if (position == Position.SB || position == Position.BU)
+                    return -0.25f;
+
+                if (position == Position.BB)
+                    return 0.05f;
+            }
+
+            switch (position)
+            {
+                case Position.UTG: return 0.42f;
+                case Position.HJ:  return 0.25f;
+                case Position.CO:  return 0.10f;
+                case Position.BU:  return -0.12f;
+                case Position.SB:  return 0.18f;
+                case Position.BB:  return 0.06f;
+                default:           return 0.20f;
+            }
+        }
+
+        private static PreFlopActionBucket ActionToBucket(ActionType actionType)
+        {
+            if (actionType == ActionType.Bet || actionType == ActionType.Raise || actionType == ActionType.AllIn)
+                return PreFlopActionBucket.BetRaise;
+
+            if (actionType == ActionType.Check || actionType == ActionType.Call)
+                return PreFlopActionBucket.CheckCall;
+
+            return PreFlopActionBucket.Fold;
+        }
+
+        private static float NormalizeRank(int rank)
+        {
+            return Clamp01((rank - 2) / 12.0f);
+        }
+
+        private static float ClampProbability(float x)
+        {
+            if (float.IsNaN(x) || float.IsInfinity(x))
+                return 0.0f;
+
+            if (x < 0.0f)
+                return 0.0f;
+
+            if (x > 1.0f)
+                return 1.0f;
+
+            return x;
+        }
+
+        private static float Clamp01(float x)
+        {
+            if (x < 0.0f)
+                return 0.0f;
+
+            if (x > 1.0f)
+                return 1.0f;
+
+            return x;
         }
 
         public Dictionary<string, float> GetCompressedRange()
