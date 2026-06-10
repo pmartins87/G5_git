@@ -28,6 +28,7 @@ namespace G5Bridge
         private static int _numPlayers = 0;
         public static int _buttonIndex = 0;
         private static bool _wasHeadsUp = false;
+        private static bool _streetSyncFailed = false;
 
         private static Dictionary<int, int> ChairVersions = new Dictionary<int, int>();
 
@@ -262,6 +263,7 @@ namespace G5Bridge
             [MarshalAs(UnmanagedType.LPStr)] string tableTitle)
         {
             HeroDeuFold = false;
+            _streetSyncFailed = false;
             HeroLogicalIndex = heroIndex;
             CurrentChairs = (int[])chairs.Clone();
             CurrentBigBlind = bigBlind;
@@ -396,23 +398,137 @@ namespace G5Bridge
         public static void NewAction(int playerLogIdx, int actionType, int byAmount)
             => InternalNewAction(playerLogIdx, actionType, byAmount, "NewAction");
 
+        private static string BoardToLog(Board board)
+        {
+            if (board == null || board.Cards == null || board.Cards.Count == 0)
+                return "<vazio>";
+
+            return string.Join(" ", board.Cards.Select(c => c.ToString()));
+        }
+
+        private static bool IsInvalidCard(Card card)
+        {
+            return card.rank == Card.Rank.Unknown || card.suit == Card.Suit.Unknown;
+        }
+
+        private static bool SameCard(Card a, Card b)
+        {
+            return a.ToInt() == b.ToInt();
+        }
+
+        private static bool CurrentBoardHasCard(Card card)
+        {
+            Board board = _gameState.getBoard();
+
+            if (board == null || board.Cards == null)
+                return false;
+
+            return board.Cards.Any(c => SameCard(c, card));
+        }
+
+        private static bool CurrentBoardHasSameFlop(Card c0, Card c1, Card c2)
+        {
+            Board board = _gameState.getBoard();
+
+            if (board == null || board.Cards == null || board.Cards.Count < 3)
+                return false;
+
+            return SameCard(board.Cards[0], c0) &&
+                   SameCard(board.Cards[1], c1) &&
+                   SameCard(board.Cards[2], c2);
+        }
+
+        private static void MarkStreetSyncFailure(string src, string reason)
+        {
+            _streetSyncFailed = true;
+            Log($"[{src}] ERRO DE SINCRONIA DE STREET: {reason}. " +
+                $"Board atual={BoardToLog(_gameState?.getBoard())}. " +
+                "Bloqueando novas transicoes de street ate a proxima mao para nao corromper o GameContext.");
+        }
+
         private static void InternalGoToNextStreet(string c0, string c1, string c2, int n, string src)
         {
             if (_gameState == null) return;
+
             try
             {
+                if (_streetSyncFailed)
+                {
+                    Log($"[{src}] Street ignorada: sincronizacao desta mao ja falhou. Aguardando proxima mao.");
+                    return;
+                }
+
+                Street currentStreet = _gameState.getStreet();
+
+                if (currentStreet == Street.River)
+                {
+                    Log($"[{src}] Street ignorada: jogo ja esta no river. Board={BoardToLog(_gameState.getBoard())}");
+                    return;
+                }
+
                 if (n == 3)
                 {
-                    _gameState.goToNextStreet(new List<Card> { new Card(c0), new Card(c1), new Card(c2) });
+                    Card f0 = new Card(c0);
+                    Card f1 = new Card(c1);
+                    Card f2 = new Card(c2);
+
+                    if (IsInvalidCard(f0) || IsInvalidCard(f1) || IsInvalidCard(f2))
+                    {
+                        MarkStreetSyncFailure(src, $"flop invalido recebido: '{c0} {c1} {c2}'");
+                        return;
+                    }
+
+                    if (currentStreet != Street.PreFlop)
+                    {
+                        if (currentStreet == Street.Flop && CurrentBoardHasSameFlop(f0, f1, f2))
+                        {
+                            Log($"[{src}] Flop duplicado ignorado: {c0} {c1} {c2}");
+                            return;
+                        }
+
+                        MarkStreetSyncFailure(src,
+                            $"recebido flop '{c0} {c1} {c2}' quando a street atual era {currentStreet}");
+                        return;
+                    }
+
+                    _gameState.goToNextStreet(new List<Card> { f0, f1, f2 });
                     Log($"[{src}] Flop: {c0} {c1} {c2}");
                 }
                 else if (n == 1)
                 {
-                    _gameState.goToNextStreet(new Card(c0));
+                    Card card = new Card(c0);
+
+                    if (IsInvalidCard(card))
+                    {
+                        MarkStreetSyncFailure(src, $"carta de turn/river invalida recebida: '{c0}'");
+                        return;
+                    }
+
+                    if (currentStreet == Street.PreFlop)
+                    {
+                        MarkStreetSyncFailure(src,
+                            $"recebida carta unica '{c0}' antes do flop");
+                        return;
+                    }
+
+                    if (CurrentBoardHasCard(card))
+                    {
+                        Log($"[{src}] Carta duplicada ignorada: {c0}. Board={BoardToLog(_gameState.getBoard())}");
+                        return;
+                    }
+
+                    _gameState.goToNextStreet(card);
                     Log($"[{src}] {_gameState.getStreet()}: {c0}");
                 }
+                else
+                {
+                    MarkStreetSyncFailure(src, $"numCards invalido: {n}");
+                }
             }
-            catch (Exception ex) { Log($"[{src}] ERRO: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                MarkStreetSyncFailure(src, ex.Message);
+            }
         }
 
         [DllExport("G5Bridge_GoToNextStreet", CallingConvention = CallingConvention.StdCall)]

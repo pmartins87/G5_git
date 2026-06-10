@@ -627,16 +627,42 @@ public string getPreFlopChartsInfo()
             goToNextStreet(new List<Card>(new Card[] { card }));
         }
 
+        private void ValidateNextStreetCards(List<Card> cards)
+        {
+            if (!(_street == Street.PreFlop || _street == Street.Flop || _street == Street.Turn))
+                throw new InvalidOperationException($"goToNextStreet invalido: street atual={_street}.");
+
+            if (cards == null)
+                throw new ArgumentNullException(nameof(cards));
+
+            int expectedCards = (_street == Street.PreFlop) ? 3 : 1;
+
+            if (cards.Count != expectedCards)
+                throw new InvalidOperationException(
+                    $"goToNextStreet invalido: street atual={_street}, cartas recebidas={cards.Count}, esperado={expectedCards}.");
+
+            HashSet<int> seen = new HashSet<int>();
+
+            foreach (Card boardCard in _board.Cards)
+                seen.Add(boardCard.ToInt());
+
+            foreach (Card card in cards)
+            {
+                if (card.rank == Card.Rank.Unknown || card.suit == Card.Suit.Unknown)
+                    throw new InvalidOperationException("goToNextStreet recebeu carta invalida.");
+
+                int cardIndex = card.ToInt();
+
+                if (seen.Contains(cardIndex))
+                    throw new InvalidOperationException($"goToNextStreet recebeu carta duplicada no board: {card}.");
+
+                seen.Add(cardIndex);
+            }
+        }
+
         public void goToNextStreet(List<Card> cards)
         {
-            Debug.Assert(_street == Street.PreFlop ||
-                         _street == Street.Flop ||
-                         _street == Street.Turn);
-
-            if (_street == Street.PreFlop)
-                Debug.Assert(cards.Count == 3);
-            else
-                Debug.Assert(cards.Count == 1);
+            ValidateNextStreetCards(cards);
 
             // Reset acted players after street
             int acted = 0;

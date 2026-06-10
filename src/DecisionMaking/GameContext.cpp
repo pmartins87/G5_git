@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <vector>
 #include <assert.h>
+#include <stdexcept>
+#include <cstdio>
 
 
 namespace G5Cpp
@@ -503,13 +505,40 @@ namespace G5Cpp
     {
         if (board.size >= 3)
         {
-            assert(_flopCards[0].rank() == board.card[0].rank());
-            assert(_flopCards[1].rank() == board.card[1].rank());
-            assert(_flopCards[2].rank() == board.card[2].rank());
+            bool sameFlop =
+                _flopCards[0].rank() == board.card[0].rank() &&
+                _flopCards[1].rank() == board.card[1].rank() &&
+                _flopCards[2].rank() == board.card[2].rank() &&
+                _flopCards[0].suit() == board.card[0].suit() &&
+                _flopCards[1].suit() == board.card[1].suit() &&
+                _flopCards[2].suit() == board.card[2].suit();
 
-            assert(_flopCards[0].suit() == board.card[0].suit());
-            assert(_flopCards[1].suit() == board.card[1].suit());
-            assert(_flopCards[2].suit() == board.card[2].suit());
+            if (!sameFlop)
+            {
+                char msg[512];
+                sprintf_s(
+                    msg,
+                    sizeof(msg),
+                    "GameContext::assertBoard: board dessincronizado. "
+                    "flop_cache=[r%d/s%d r%d/s%d r%d/s%d], "
+                    "board=[r%d/s%d r%d/s%d r%d/s%d], boardSize=%d",
+                    static_cast<int>(_flopCards[0].rank()),
+                    static_cast<int>(_flopCards[0].suit()),
+                    static_cast<int>(_flopCards[1].rank()),
+                    static_cast<int>(_flopCards[1].suit()),
+                    static_cast<int>(_flopCards[2].rank()),
+                    static_cast<int>(_flopCards[2].suit()),
+                    static_cast<int>(board.card[0].rank()),
+                    static_cast<int>(board.card[0].suit()),
+                    static_cast<int>(board.card[1].rank()),
+                    static_cast<int>(board.card[1].suit()),
+                    static_cast<int>(board.card[2].rank()),
+                    static_cast<int>(board.card[2].suit()),
+                    board.size
+                );
+
+                throw std::runtime_error(msg);
+            }
         }
     }
 

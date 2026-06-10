@@ -109,8 +109,19 @@ namespace G5.Logic
 
         public void AddCard(Card card)
         {
+            if (card.rank == Card.Rank.Unknown || card.suit == Card.Suit.Unknown)
+                throw new System.InvalidOperationException("Board.AddCard recebeu carta invalida.");
+
+            if (Cards.Count >= 5)
+                throw new System.InvalidOperationException("Board.AddCard excederia 5 cartas no board.");
+
+            foreach (Card existing in Cards)
+            {
+                if (existing.ToInt() == card.ToInt())
+                    throw new System.InvalidOperationException($"Board.AddCard recebeu carta duplicada: {card}.");
+            }
+
             Cards.Add(card);
-            Debug.Assert(Count <= 5);
         }
 
         public override string ToString()
