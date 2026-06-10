@@ -1,5 +1,6 @@
 #include "GameState.h"
 #include <algorithm>
+#include <stdexcept>
 
 
 namespace G5Cpp
@@ -19,10 +20,10 @@ namespace G5Cpp
         _tableType = tableType;
         _players.reserve(nPlayers);
 
-        for (int i=0; i<nPlayers; i++)
+        for (int i = 0; i < nPlayers; i++)
             _players.emplace_back(players[i]);
 
-        assert (heroIndex >= 0 && heroIndex < nPlayers);
+        assert(heroIndex >= 0 && heroIndex < nPlayers);
 
         this->buttonInd = buttonInd;
         this->heroInd = heroIndex;
@@ -79,7 +80,7 @@ namespace G5Cpp
 
     bool GameState::canNextPlayerRaise() const
     {
-        return areBetsLeft() && 
+        return areBetsLeft() &&
             getAmountToCall() < playerToAct().stack() &&
             numActiveNonAllInPlayers() > 1;
     }
@@ -111,7 +112,7 @@ namespace G5Cpp
         return amountToCall;
     }
 
-    bool GameState::isBanned(const Card& card) const 
+    bool GameState::isBanned(const Card& card) const
     {
         int cardInd = card.toInt();
 
@@ -125,7 +126,7 @@ namespace G5Cpp
             return true;
         }
 
-        for (int i=0; i<board.size; i++)
+        for (int i = 0; i < board.size; i++)
         {
             if (board.card[i].toInt() == cardInd)
                 return true;
@@ -149,7 +150,7 @@ namespace G5Cpp
         return _players[playerToActInd];
     }
 
-    int GameState::numActivePlayers() const 
+    int GameState::numActivePlayers() const
     {
         int activePlayers = 0;
 
@@ -177,7 +178,7 @@ namespace G5Cpp
 
     bool GameState::isPlayerInPosition(int playerIndex) const
     {
-        assert (playerIndex > -1);
+        assert(playerIndex > -1);
 
         if (playerIndex < 0)
             return false;
@@ -219,14 +220,74 @@ namespace G5Cpp
         return true;
     }
 
-    ActionDistribution GameState::getPlayerToActAD() const 
+    ActionDistribution GameState::getPlayerToActAD() const
     {
         ActionDistribution ad;
 
         if (street == Street_PreFlop)
         {
-            PreFlopParams params(_tableType, playerToAct().preFlopPosition(), numCallers, numBets, numActivePlayers(),
-                playerToAct().lastAction(), isPlayerInPosition(playerToActInd));
+            // ---------------------------------------------------------------------
+            // CORRECAO HU PREFLOP
+            //
+            // Problema encontrado no simulador offline:
+            // Em jogos heads-up, PreFlopParams::toIndex() aceita apenas duas posicoes:
+            // Position_SmallBlind e Position_BigBlind.
+            //
+            // Antes, o codigo usava diretamente:
+            // playerToAct().preFlopPosition()
+            //
+            // Em alguns estados gerados pela simulacao, essa posicao podia chegar como
+            // uma posicao generica, por exemplo BTN, Button, Unknown ou equivalente,
+            // causando a excecao:
+            //
+            // "Bad position in heads-up game"
+            //
+            // Correcao:
+            // Em HU, a posicao pre-flop deve ser derivada do buttonInd:
+            // - o jogador no botao e o Small Blind;
+            // - o outro jogador e o Big Blind.
+            //
+            // Isso nao cria uma decisao paliativa. Apenas corrige a representacao
+            // matematica do estado antes de consultar o modelo estatistico.
+            // ---------------------------------------------------------------------
+
+            Position pfPosition = playerToAct().preFlopPosition();
+            bool inPosition = isPlayerInPosition(playerToActInd);
+
+            if (_tableType == TableType_HU)
+            {
+                if (_players.size() != 2)
+                {
+                    throw std::runtime_error("GameState::getPlayerToActAD: TableType_HU com numero de jogadores diferente de 2");
+                }
+
+                if (playerToActInd == buttonInd)
+                {
+                    pfPosition = Position_SmallBlind;
+
+                    // Em HU, o Button/SB joga fora de posicao no pre-flop,
+                    // mas em posicao no pos-flop.
+                    inPosition = true;
+                }
+                else
+                {
+                    pfPosition = Position_BigBlind;
+
+                    // Em HU, o BB joga em posicao no pre-flop,
+                    // mas fora de posicao no pos-flop.
+                    inPosition = false;
+                }
+            }
+
+            PreFlopParams params(
+                _tableType,
+                pfPosition,
+                numCallers,
+                numBets,
+                numActivePlayers(),
+                playerToAct().lastAction(),
+                inPosition
+            );
 
             ad = playerToAct().getAD(params);
         }
@@ -235,7 +296,16 @@ namespace G5Cpp
             int round = playerToAct().gound();
             ActionType prevAction = (round == 0) ? playerToAct().prevStreetAction() : playerToAct().lastAction();
 
-            PostFlopParams params(_tableType, street, round, prevAction, numBets, isPlayerInPosition(playerToActInd), numActivePlayers());
+            PostFlopParams params(
+                _tableType,
+                street,
+                round,
+                prevAction,
+                numBets,
+                isPlayerInPosition(playerToActInd),
+                numActivePlayers()
+            );
+
             ad = playerToAct().getAD(params);
         }
 
@@ -270,7 +340,7 @@ namespace G5Cpp
                 maxOppMoneyInThePot = std::max(maxOppMoneyInThePot, _players[i].moneyInPot());
         }
 
-        assert (bigBlindSize > 0);
+        assert(bigBlindSize > 0);
 
         int rakableWinnings = winnings - std::max(_players[heroInd].moneyInPot() - maxOppMoneyInThePot, 0);
         int rake;
@@ -286,7 +356,7 @@ namespace G5Cpp
         }
 
         winnings -= rake;
-        return (float) winnings;
+        return (float)winnings;
     }
 
     void GameState::goToFirstPlayer()
@@ -320,7 +390,7 @@ namespace G5Cpp
             return;
         }
 
-        assert (_players.size() > 1);
+        assert(_players.size() > 1);
 
         for (int i = playerToActInd + 1; i < (int)_players.size(); i++)
         {
@@ -490,7 +560,7 @@ namespace G5Cpp
 
     GameState GameState::playerFolds(float nodeProbability) const
     {
-        assert (playerToActInd != heroInd);
+        assert(playerToActInd != heroInd);
 
         GameState newPrms(*this);
         newPrms.playerToAct().folds();

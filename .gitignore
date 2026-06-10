@@ -4,3 +4,40 @@
 obj
 /dl/.vscode
 /dl/__pycache__
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+
+# Build outputs
+bin/
+obj/
+Debug/
+Release/
+x86/
+x64/
+
+# C++ build artifacts
+*.obj
+*.pdb
+*.ipdb
+*.iobj
+*.ilk
+*.tlog
+*.log
+*.recipe
+*.lastbuildstate
+
+# .NET / NuGet local packages
+packages/
+*.nupkg
+
+# DLLs e executaveis gerados
+*.dll
+*.exe
+
+# Excecao: manter DLL especifica se for realmente dependencia manual
+# !src/G5Bridge/G5Logic.dll
