@@ -1,0 +1,15 @@
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\AllCounters.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\Release\AllCounters.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\AllHandStrengths.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\Release\AllHandStrengths.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Card.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\Release\Card.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Common.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\Release\Common.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\GameContext.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\Release\GameContext.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\GameState.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\Release\GameState.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\HandStrength.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\Release\HandStrength.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\HandStrengthCounter.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\Release\HandStrengthCounter.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\PlayerModel.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\Release\PlayerModel.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\PostFlopParams.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\Release\PostFlopParams.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\PreFlopEquity.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\Release\PreFlopEquity.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\PreFlopParams.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\Release\PreFlopParams.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Range.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\Release\Range.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\G5_OH_Bridge.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\Release\G5_OH_Bridge.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\OpenHoldemFunctions.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\G5_OH_Bridge\Release\OpenHoldemFunctions.obj

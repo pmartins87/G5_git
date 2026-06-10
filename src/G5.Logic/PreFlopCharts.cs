@@ -7,9 +7,30 @@ using System.Text;
 
 namespace G5.Logic
 {
-    internal class PreFlopCharts
-    {
-        private Dictionary<Position, PreFlopChart> vs_0_bets_charts = new Dictionary<Position, PreFlopChart>();
+	internal class PreFlopCharts
+	{
+		public string SourcePath { get; private set; }
+		public int LoadedCount { get; private set; }
+		public List<string> IgnoredFiles { get; private set; }
+		private Dictionary<Position, PreFlopChart> vs_0_bets_charts = new Dictionary<Position, PreFlopChart>();
+
+		// Charts próprias contra open limp.
+		// Chave externa:
+		//   0 = chart genérica contra limp, independente do número de limpers.
+		//   1 = contra 1 limper.
+		//   2 = contra 2 limpers.
+		//   etc.
+		// Chave interna:
+		//   posição do herói.
+		private Dictionary<int, Dictionary<Position, PreFlopChart>> vs_limp_charts =
+		    new Dictionary<int, Dictionary<Position, PreFlopChart>>();
+
+		public string LastLookupInfo { get; private set; }
+
+		public int IgnoredCount
+		{
+		    get { return IgnoredFiles == null ? 0 : IgnoredFiles.Count; }
+		}
 
         private Dictionary<Position, Dictionary<Position, PreFlopChart>> vs_1_bet_charts = 
             new Dictionary<Position, Dictionary<Position, PreFlopChart>>();
@@ -25,6 +46,36 @@ namespace G5.Logic
 
         private Dictionary<Position, Dictionary<Position, PreFlopChart>> vs_4_bets_charts =
             new Dictionary<Position, Dictionary<Position, PreFlopChart>>();
+
+private bool tryParseLimpChartFile(string fileName, string[] parts, out int numLimpers, out Position heroPosition)
+{
+    numLimpers = 0; // 0 = genérico
+    heroPosition = Position.Empty;
+
+    if (!(fileName.StartsWith("VS_Limp_", StringComparison.OrdinalIgnoreCase) ||
+          fileName.StartsWith("VS_Limps_", StringComparison.OrdinalIgnoreCase) ||
+          fileName.StartsWith("VS_Limper_", StringComparison.OrdinalIgnoreCase) ||
+          fileName.StartsWith("VS_Limpers_", StringComparison.OrdinalIgnoreCase)))
+    {
+        return false;
+    }
+
+    for (int i = 0; i < parts.Length; i++)
+    {
+        int n;
+        if (int.TryParse(parts[i], out n))
+            numLimpers = n;
+
+        if (parts[i].Equals("Hero", StringComparison.OrdinalIgnoreCase) && i + 1 < parts.Length)
+            heroPosition = shorthandToPosition(parts[i + 1]);
+    }
+
+    // Fallback: se não houver "Hero_CO", tenta usar a última parte como posição.
+    if (heroPosition == Position.Empty && parts.Length > 0)
+        heroPosition = shorthandToPosition(parts[parts.Length - 1]);
+
+    return heroPosition != Position.Empty;
+}
 
         private Position shorthandToPosition(string shorthand)
         {
@@ -48,7 +99,16 @@ namespace G5.Logic
 
         public PreFlopCharts(string path)
         {
-            Console.WriteLine($"Reading preflop charts from {path}.");
+            if (string.IsNullOrWhiteSpace(path))
+                throw new ArgumentException("PreFlopCharts: path vazio.");
+
+            SourcePath = Path.GetFullPath(path);
+            IgnoredFiles = new List<string>();
+
+            if (!Directory.Exists(SourcePath))
+                throw new DirectoryNotFoundException($"PreFlopCharts: pasta nao encontrada: {SourcePath}");
+
+            Console.WriteLine($"Reading preflop charts from {SourcePath}.");
             int numLoaded = 0;
 
             foreach (Position heroPosition in Enum.GetValues(typeof(Position)))
@@ -69,13 +129,25 @@ namespace G5.Logic
                 }
             }
 
-            foreach (var file in Directory.GetFiles(path, "*.txt", SearchOption.AllDirectories))
+            foreach (var file in Directory.GetFiles(SourcePath, "*.txt", SearchOption.AllDirectories))
             {
                 var fileName = Path.GetFileName(file);
                 string[] parts = fileName.Split(new char[] { '_', '.' }, StringSplitOptions.RemoveEmptyEntries);
                 
 
-                if (fileName.StartsWith("VS_0_Bets_") && parts.Length > 4)
+                int limpCount;
+                Position limpHeroPosition;
+
+                if (tryParseLimpChartFile(fileName, parts, out limpCount, out limpHeroPosition))
+                {
+                    if (!vs_limp_charts.ContainsKey(limpCount))
+                        vs_limp_charts[limpCount] = new Dictionary<Position, PreFlopChart>();
+
+                    vs_limp_charts[limpCount][limpHeroPosition] = new PreFlopChart(file);
+                    Console.WriteLine($"Loaded preflop chart for {limpHeroPosition} facing {limpCount} limper(s) from {fileName}.");
+                    numLoaded++;
+                }
+                else if (fileName.StartsWith("VS_0_Bets_") && parts.Length > 4)
                 {
                     var position = shorthandToPosition(parts[4]);
 
@@ -132,9 +204,22 @@ namespace G5.Logic
                     Console.WriteLine($"Loaded preflop chart for {position_hero} facing 4 bets of {position_villian} from {fileName}.");
                     numLoaded++;
                 }
+                else
+                {
+                    IgnoredFiles.Add(fileName);
+                    Console.WriteLine($"Ignored unrecognized preflop chart file: {fileName}");
+                }
             }
 
-            Console.WriteLine($"Loaded {numLoaded} preflop charts");
+            LoadedCount = numLoaded;
+
+            if (LoadedCount <= 0)
+                throw new Exception($"PreFlopCharts: nenhuma chart valida carregada em {SourcePath}.");
+
+            Console.WriteLine($"Loaded {LoadedCount} preflop charts from {SourcePath}");
+
+            if (IgnoredFiles.Count > 0)
+                Console.WriteLine($"Ignored {IgnoredFiles.Count} unrecognized preflop chart files in {SourcePath}");
         }
 
         public ActionDistribution GetActionDistribution(BotGameState gameState, int preFlopChartsLevel)
@@ -142,11 +227,51 @@ namespace G5.Logic
             if (gameState.getStreet() != Street.PreFlop)
                 return null;
 
-            var heroPos = gameState.getHero().PreFlopPosition;
-            var bettorPositions = gameState.getBettors();
+var heroPos = gameState.getHero().PreFlopPosition;
+var bettorPositions = gameState.getBettors();
 
-            if (gameState.getNumBets() == 0 && gameState.getNumCallers() == 0) // RFI
-            {
+LastLookupInfo = "";
+
+// Open limp antes do herói:
+// não há raise, mas já há caller(s).
+if (gameState.getNumBets() == 0 && gameState.getNumCallers() > 0)
+{
+    int limpers = gameState.getNumCallers();
+
+    if (preFlopChartsLevel >= 0)
+    {
+        // 1) Primeiro tenta chart específica para o número exato de limpers.
+        if (vs_limp_charts.ContainsKey(limpers) &&
+            vs_limp_charts[limpers].ContainsKey(heroPos))
+        {
+            LastLookupInfo = $"open limp: usando chart propria contra {limpers} limper(s), heroPos={heroPos}.";
+            return vs_limp_charts[limpers][heroPos].GetActionDistribution(gameState.getHeroHoleCards());
+        }
+
+        // 2) Depois tenta chart genérica contra limp.
+        if (vs_limp_charts.ContainsKey(0) &&
+            vs_limp_charts[0].ContainsKey(heroPos))
+        {
+            LastLookupInfo = $"open limp: usando chart generica contra limp, heroPos={heroPos}.";
+            return vs_limp_charts[0][heroPos].GetActionDistribution(gameState.getHeroHoleCards());
+        }
+
+        // 3) Fallback formal: usa RFI da posição como baseline de isolamento.
+        // Isso evita que mãos premium, como AA, caiam no ModelingEstimator e deem limp behind.
+        // Quando você criar charts VS_Limp_..., elas terão prioridade sobre este fallback.
+        if (vs_0_bets_charts.ContainsKey(heroPos))
+        {
+            LastLookupInfo = $"open limp: sem chart propria contra limp; usando RFI de {heroPos} como baseline de isolamento.";
+            return vs_0_bets_charts[heroPos].GetActionDistribution(gameState.getHeroHoleCards());
+        }
+    }
+
+    LastLookupInfo = $"open limp: sem chart propria e sem RFI baseline para heroPos={heroPos}.";
+    return null;
+}
+
+if (gameState.getNumBets() == 0 && gameState.getNumCallers() == 0) // RFI
+{
                 if (preFlopChartsLevel >= 0)
                 {
                     if (vs_0_bets_charts.ContainsKey(heroPos))

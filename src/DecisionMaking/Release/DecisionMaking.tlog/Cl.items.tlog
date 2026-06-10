@@ -1,0 +1,17 @@
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\AllCounters.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\AllCounters.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\AllHandStrengths.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\AllHandStrengths.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Card.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\Card.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Common.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\Common.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\DecisionMaking.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\DecisionMaking.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\dllmain.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\dllmain.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\ForExport.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\ForExport.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\GameContext.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\GameContext.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\GameState.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\GameState.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\HandStrength.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\HandStrength.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\HandStrengthCounter.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\HandStrengthCounter.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\PlayerModel.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\PlayerModel.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\PostFlopParams.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\PostFlopParams.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Pot.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\Pot.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\PreFlopEquity.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\PreFlopEquity.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\PreFlopParams.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\PreFlopParams.obj
+C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Range.cpp;C:\Users\Caixa\Desktop\personal\g5_git\src\DecisionMaking\Release\Range.obj

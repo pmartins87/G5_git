@@ -39,8 +39,92 @@ namespace G5.Logic
 
         private int _preFlopChartsLevel;
 
-        // Options
-        private bool _randomlySampleActions;
+// Options
+private bool _randomlySampleActions;
+
+private string _preFlopChartsPath = "";
+private string _preFlopChartsBucket = "";
+private int _preFlopChartsEffectiveStackBb = 0;
+private int _preFlopChartsLoadedCount = 0;
+
+private static int CalculatePreFlopChartEffectiveStackBb(int[] stackSizes, int heroIndex, int bigBlindSize)
+{
+    if (stackSizes == null || stackSizes.Length < 2)
+        throw new ArgumentException("BotGameState: stackSizes invalido para selecionar charts preflop.");
+
+    if (bigBlindSize <= 0)
+        throw new ArgumentException("BotGameState: bigBlindSize invalido para selecionar charts preflop.");
+
+    if (heroIndex < 0 || heroIndex >= stackSizes.Length)
+        throw new ArgumentException("BotGameState: heroIndex invalido para selecionar charts preflop.");
+
+    int heroStack = stackSizes[heroIndex];
+
+    if (heroStack <= 0)
+        throw new ArgumentException("BotGameState: stack do heroi invalido para selecionar charts preflop.");
+
+    int maxOpponentStack = 0;
+
+    for (int i = 0; i < stackSizes.Length; i++)
+    {
+        if (i == heroIndex)
+            continue;
+
+        if (stackSizes[i] > maxOpponentStack)
+            maxOpponentStack = stackSizes[i];
+    }
+
+    if (maxOpponentStack <= 0)
+        throw new ArgumentException("BotGameState: stacks dos oponentes invalidos para selecionar charts preflop.");
+
+    int effectiveStack = Math.Min(heroStack, maxOpponentStack);
+
+    int effectiveStackBb = (effectiveStack + (bigBlindSize / 2)) / bigBlindSize;
+
+    if (effectiveStackBb <= 0)
+        effectiveStackBb = 1;
+
+    return effectiveStackBb;
+}
+
+private static string SelectPreFlopChartsFolder(string assemblyFolder, int effectiveStackBb, out string selectedBucket)
+{
+    if (string.IsNullOrWhiteSpace(assemblyFolder))
+        throw new ArgumentException("BotGameState: assemblyFolder vazio ao selecionar charts preflop.");
+
+    string chartsRoot = Path.Combine(assemblyFolder, "PreFlopCharts");
+
+    int target = effectiveStackBb <= 150 ? 100 : 200;
+    string targetBucket = target + "bb";
+    string targetPath = Path.Combine(chartsRoot, targetBucket);
+
+    if (Directory.Exists(targetPath))
+    {
+        selectedBucket = targetBucket;
+        return targetPath;
+    }
+
+    int fallback = target == 100 ? 200 : 100;
+    string fallbackBucket = fallback + "bb";
+    string fallbackPath = Path.Combine(chartsRoot, fallbackBucket);
+
+    if (Directory.Exists(fallbackPath))
+    {
+        selectedBucket = fallbackBucket + $" (fallback; alvo era {targetBucket})";
+        return fallbackPath;
+    }
+
+    throw new DirectoryNotFoundException(
+        $"BotGameState: nenhuma pasta de charts preflop encontrada. " +
+        $"Esperado: {targetPath} ou {fallbackPath}");
+}
+
+public string getPreFlopChartsInfo()
+{
+    int ignored = (_preFlopCharts == null) ? 0 : _preFlopCharts.IgnoredCount;
+
+    return $"bucket={_preFlopChartsBucket}, effectiveStack={_preFlopChartsEffectiveStackBb}bb, files={_preFlopChartsLoadedCount}, ignored={ignored}, path={_preFlopChartsPath}";
+}
 
         public int smallBlindInd()
         {
@@ -82,7 +166,11 @@ namespace G5.Logic
             _randomlySampleActions = randomlySampleActions;
 
             string assemblyFolder = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-            _preFlopCharts = new PreFlopCharts(assemblyFolder + "\\PreFlopCharts\\100bb\\");
+
+            _preFlopChartsEffectiveStackBb = CalculatePreFlopChartEffectiveStackBb(stackSizes, heroIndex, bigBlingSize);
+            _preFlopChartsPath = SelectPreFlopChartsFolder(assemblyFolder, _preFlopChartsEffectiveStackBb, out _preFlopChartsBucket);
+            _preFlopCharts = new PreFlopCharts(_preFlopChartsPath);
+            _preFlopChartsLoadedCount = _preFlopCharts.LoadedCount;
 
             _tableType = tableType;
             _players = new List<Player>();
@@ -895,8 +983,9 @@ namespace G5.Logic
                 var villainPos = (_bettors.Count > 0) ? _bettors.Last() : Position.Empty;
 
                 bd.message += $" -> We have pre-flop chart for this situation (Hero pos {heroPos}, villianPos {villainPos}, num bets {_numBets}, num callers {_numCallers}).\n";
-                bd.message += $" -> We are reading AD, allin prob {pfcActionDistribution.allinProb} br prob {pfcActionDistribution.brProb}, cc prob {pfcActionDistribution.ccProb} (Modeling estimator gave br {bd.betRaiseEV:F2} cc {bd.checkCallEV:F2}).\n";
-
+bd.message += $" -> Preflop chart set: {getPreFlopChartsInfo()}.\n";
+bd.message += $" -> Chart lookup: {_preFlopCharts.LastLookupInfo}.\n";
+bd.message += $" -> We are reading AD, allin prob {pfcActionDistribution.allinProb} br prob {pfcActionDistribution.brProb}, cc prob {pfcActionDistribution.ccProb} (Modeling estimator gave br {bd.betRaiseEV:F2} cc {bd.checkCallEV:F2}).\n";
                 bd.actionType = pfcActionDistribution.sample(_rng);
                 bd.message += $" -> Sampled action is {bd.actionType}";
             }
@@ -907,6 +996,13 @@ namespace G5.Logic
                     var heroPos = getHero().PreFlopPosition;
                     var villainPos = (_bettors.Count > 0) ? _bettors.Last() : Position.Empty;
                     bd.message += $" -> We do NOT have pre-flop chart for this situation (Hero pos {heroPos}, villianPos {villainPos}, num bets {_numBets}, num callers {_numCallers}).\n";
+                    bd.message += $" -> Preflop chart set: {getPreFlopChartsInfo()}.\n";
+
+if (_numBets == 0 && _numCallers > 0)
+{
+    bd.message += $" -> Spot identificado como open limp/limp antes do heroi.\n";
+    bd.message += $" -> Chart lookup: {_preFlopCharts.LastLookupInfo}.\n";
+}
                 }
 
                 bd.message += $" -> Using modeling estimator result br {bd.betRaiseEV:F2} cc {bd.checkCallEV:F2}.\n";
