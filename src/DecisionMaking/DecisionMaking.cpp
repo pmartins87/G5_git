@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdarg>
+#include <cmath>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -359,6 +360,145 @@ namespace G5Cpp
                 return pot + 2 * amountToCall;
 
             return (2 * (pot + amountToCall)) / 3 + amountToCall;
+        }
+
+        struct DMRangeSampler
+        {
+            int length;
+            int activeCombos;
+            float mass;
+            int handIndex[N_HOLECARDS];
+            float cdf[N_HOLECARDS];
+        };
+
+        void DMBuildBaseBlockedCards(bool* blocked, const GameState& prms)
+        {
+            for (int i = 0; i < 52; i++)
+                blocked[i] = false;
+
+            int hero0 = prms.heroHoleCards.Card0.toInt();
+            int hero1 = prms.heroHoleCards.Card1.toInt();
+
+            if (hero0 >= 0 && hero0 < 52)
+                blocked[hero0] = true;
+
+            if (hero1 >= 0 && hero1 < 52)
+                blocked[hero1] = true;
+
+            for (int i = 0; i < prms.board.size; i++)
+            {
+                int card = prms.board.card[i].toInt();
+
+                if (card >= 0 && card < 52)
+                    blocked[card] = true;
+            }
+        }
+
+        bool DMHandConflictsWithBlockedCards(int handIndex, const bool* blocked)
+        {
+            int c0 = handIndex / 52;
+            int c1 = handIndex % 52;
+
+            if (c0 < 0 || c0 >= 52 || c1 < 0 || c1 >= 52)
+                return true;
+
+            if (c0 == c1)
+                return true;
+
+            return blocked[c0] || blocked[c1];
+        }
+
+        void DMBuildRangeSampler(DMRangeSampler& sampler, const Player& player, const bool* baseBlocked, const char* context)
+        {
+            sampler.length = 0;
+            sampler.activeCombos = 0;
+            sampler.mass = 0.0f;
+
+            const Range& range = player.range();
+            int rangeLength = range.length();
+            const int* hcIndex = range.hcIndex();
+            const float* likelihood = range.likelihood();
+
+            for (int i = 0; i < rangeLength; i++)
+            {
+                float w = likelihood[i];
+
+                if (!(w > 0.0f) || !std::isfinite(w))
+                    continue;
+
+                int handIndex = hcIndex[i];
+
+                if (DMHandConflictsWithBlockedCards(handIndex, baseBlocked))
+                    continue;
+
+                sampler.handIndex[sampler.length] = handIndex;
+                sampler.mass += w;
+                sampler.cdf[sampler.length] = sampler.mass;
+                sampler.length++;
+                sampler.activeCombos++;
+            }
+
+            if (sampler.length <= 0 || !(sampler.mass > 0.0f) || !std::isfinite(sampler.mass))
+            {
+                char msg[512];
+                snprintf(msg, sizeof(msg), "DecisionMaking: range sem massa valida em sampler multiway (%s)", context ? context : "sem contexto");
+                DMLogAlways(msg);
+                throw std::runtime_error(msg);
+            }
+
+            float invMass = 1.0f / sampler.mass;
+
+            for (int i = 0; i < sampler.length; i++)
+                sampler.cdf[i] *= invMass;
+
+            sampler.cdf[sampler.length - 1] = 1.0f;
+        }
+
+        float DMRand01(ParkMillerCarta& rng)
+        {
+            unsigned int v = static_cast<unsigned int>(rng.next());
+            return ((v % 1000000u) + 0.5f) / 1000000.0f;
+        }
+
+        int DMSampleHandIndex(const DMRangeSampler& sampler, ParkMillerCarta& rng)
+        {
+            float x = DMRand01(rng);
+            int lo = 0;
+            int hi = sampler.length - 1;
+
+            while (lo < hi)
+            {
+                int mid = lo + ((hi - lo) / 2);
+
+                if (x <= sampler.cdf[mid])
+                    hi = mid;
+                else
+                    lo = mid + 1;
+            }
+
+            return sampler.handIndex[lo];
+        }
+
+        bool DMTryReserveOpponentHand(int handIndex, const bool* baseBlocked, bool* usedOpponentCards, int& c0, int& c1)
+        {
+            c0 = handIndex / 52;
+            c1 = handIndex % 52;
+
+            if (c0 < 0 || c0 >= 52 || c1 < 0 || c1 >= 52)
+                return false;
+
+            if (c0 == c1)
+                return false;
+
+            if (baseBlocked[c0] || baseBlocked[c1])
+                return false;
+
+            if (usedOpponentCards[c0] || usedOpponentCards[c1])
+                return false;
+
+            usedOpponentCards[c0] = true;
+            usedOpponentCards[c1] = true;
+            return true;
         }
 
         void DMLogOpponentRanges(const char* label, const GameState& prms)
@@ -799,6 +939,9 @@ namespace G5Cpp
             int turn = prms.board.card[3].toInt();
             int river = prms.board.card[4].toInt();
 
+            bool baseBlocked[52];
+            DMBuildBaseBlockedCards(baseBlocked, prms);
+
             float possibleWinnings = prms.getPossibleWinnings();
             const AllHandStrengths& handStrenghts = prms.gc.allHandStrengths();
             int heroHandStrength = handStrenghts.getRiverHandStrength(turn, river, prms.heroHoleCards.toInt());
@@ -836,11 +979,15 @@ namespace G5Cpp
                 {
                     float eq = oppRangeLikelihood[i];
 
-                    if (eq == 0.0f)
+                    if (!(eq > 0.0f) || !std::isfinite(eq))
                         continue;
 
-                    //HoleCards oppHC(range.ind[i]);
-                    int oppHS = handStrenghts.getRiverHandStrength(turn, river, oppRangeHCInd[i]);
+                    int oppHandIndex = oppRangeHCInd[i];
+
+                    if (DMHandConflictsWithBlockedCards(oppHandIndex, baseBlocked))
+                        continue;
+
+                    int oppHS = handStrenghts.getRiverHandStrength(turn, river, oppHandIndex);
 
                     float heroShare = 0.0f;
 
@@ -859,12 +1006,18 @@ namespace G5Cpp
                     cnt++;
                 }
 
+                if (likelihoodSum <= 0.0f)
+                {
+                    DMLogAlways("FATAL: likelihoodSum <= 0 em showdown HU.");
+                    throw std::runtime_error("DecisionMaking: likelihoodSum <= 0 em showdown HU");
+                }
+
                 stats.showDown_NumValidRuns += cnt;
-                EV = totalWinnings;
+                EV = totalWinnings / likelihoodSum;
 
                 if (DMShouldLog(&g_DMShowdownLogCount, DM_MAX_SHOWDOWN_LOGS))
                 {
-                    float normalizedEquity = (likelihoodSum > 0.0f) ? (heroShareWeighted / likelihoodSum) : 0.0f;
+                    float normalizedEquity = heroShareWeighted / likelihoodSum;
 
                     DMLogF(
                         "[DM][SHOWDOWN HU] street=%s pot=%d possibleWinnings=%.2f oppRangeLen=%d activeCombos=%d likelihoodSum=%.6f heroShareWeighted=%.6f normalizedEquity=%.6f heroHS=%d EV=%.6f nodeChance=%.6f",
@@ -884,88 +1037,64 @@ namespace G5Cpp
             }
             else
             {
-                int opponentHandIndexes[MAX_PLAYERS * SHOWDOWN_BIN_COUNT];
+                DMRangeSampler samplers[MAX_PLAYERS];
 
                 for (int i = 0; i < nOpponents; i++)
                 {
-                    opponents[i]->range_FillHandIndices(&opponentHandIndexes[i * SHOWDOWN_BIN_COUNT], SHOWDOWN_BIN_COUNT);
+                    DMBuildRangeSampler(samplers[i], *opponents[i], baseBlocked, "showdown multiway");
                 }
 
-                HoleCards opponentHoleCards[MAX_PLAYERS];
                 Pot pot(prms._players);
                 ParkMillerCarta rng(1);
 
                 float totalWinnings = 0.0f;
                 int nIter = 0;
-                bool isOppCard[52];
+                int attempts = 0;
 
-                for (int j = 0; j < 52; j++)
-                    isOppCard[j] = false;
-
-                for (int attempts = 0; nIter < SHOWDOWN_ITERATIONS && attempts < SHOWDOWN_ITERATIONS * 200; attempts++)
+                for (attempts = 0; nIter < SHOWDOWN_ITERATIONS && attempts < SHOWDOWN_ITERATIONS * 300; attempts++)
                 {
-                    // Choose opponent hole cards randomly
-                    for (int j = 0; j < nOpponents; j++)
-                    {
-                        int index = rng.next() % SHOWDOWN_BIN_COUNT;
-                        opponentHoleCards[j] = HoleCards(opponentHandIndexes[j * SHOWDOWN_BIN_COUNT + index]);
-                    }
+                    bool usedOpponentCards[52];
 
+                    for (int c = 0; c < 52; c++)
+                        usedOpponentCards[c] = false;
+
+                    int opponentHoleCardsInd[MAX_PLAYERS];
                     bool valid = true;
 
-                    // Ban choosen hole cards and check if combinationis is valid
                     for (int j = 0; j < nOpponents; j++)
                     {
-                        int ind0 = opponentHoleCards[j].Card0.toInt();
-                        int ind1 = opponentHoleCards[j].Card1.toInt();
+                        int c0 = -1;
+                        int c1 = -1;
+                        int sampledHand = DMSampleHandIndex(samplers[j], rng);
 
-                        int hero0 = prms.heroHoleCards.Card0.toInt();
-                        int hero1 = prms.heroHoleCards.Card1.toInt();
-
-                        if (ind0 == hero0 || ind0 == hero1 || ind0 == turn || ind0 == river ||
-                            ind1 == hero0 || ind1 == hero1 || ind1 == turn || ind1 == river ||
-                            isOppCard[ind0] || isOppCard[ind1] ||
-                            ind0 == ind1)
+                        if (!DMTryReserveOpponentHand(sampledHand, baseBlocked, usedOpponentCards, c0, c1))
                         {
                             valid = false;
+                            break;
                         }
 
-                        isOppCard[ind0] = true;
-                        isOppCard[ind1] = true;
+                        opponentHoleCardsInd[j] = sampledHand;
                     }
 
-                    // If combination is valid calculate EV
-                    if (valid)
-                    {
-                        for (int j = 0; j < nOpponents; j++)
-                        {
-                            int opponentHandStrength = handStrenghts.getRiverHandStrength(turn, river, opponentHoleCards[j].toInt());
-                            pot.addHandStrength(opponentHandStrength, opponents[j]->moneyInPot());
-                        }
+                    if (!valid)
+                        continue;
 
-                        pot.addHandStrength(heroHandStrength, prms.hero().moneyInPot());
-                        totalWinnings += pot.calculateWinnings(heroHandStrength, prms.hero().moneyInPot());
-                        nIter++;
-                    }
-
-                    // Un-ban chosen hole cards
                     for (int j = 0; j < nOpponents; j++)
                     {
-                        int ind0 = opponentHoleCards[j].Card0.toInt();
-                        int ind1 = opponentHoleCards[j].Card1.toInt();
-
-                        isOppCard[ind0] = false;
-                        isOppCard[ind1] = false;
+                        int opponentHandStrength = handStrenghts.getRiverHandStrength(turn, river, opponentHoleCardsInd[j]);
+                        pot.addHandStrength(opponentHandStrength, opponents[j]->moneyInPot());
                     }
 
-                    // Reset the pot
+                    pot.addHandStrength(heroHandStrength, prms.hero().moneyInPot());
+                    totalWinnings += pot.calculateWinnings(heroHandStrength, prms.hero().moneyInPot());
                     pot.reset();
+                    nIter++;
                 }
 
                 if (nIter <= 0)
                 {
-                    DMLogAlways("FATAL: nIter == 0 em amostragem multiway. Nenhuma combinacao valida de cartas dos oponentes foi encontrada.");
-                    throw std::runtime_error("DecisionMaking: nIter == 0 em amostragem multiway");
+                    DMLogAlways("FATAL: nIter == 0 em showdown multiway. Nenhuma combinacao valida de cartas dos oponentes foi encontrada.");
+                    throw std::runtime_error("DecisionMaking: nIter == 0 em showdown multiway");
                 }
 
                 stats.showDown_NumValidRuns += nIter;
@@ -973,14 +1102,18 @@ namespace G5Cpp
 
                 if (DMShouldLog(&g_DMShowdownLogCount, DM_MAX_SHOWDOWN_LOGS))
                 {
+                    float acceptance = (attempts > 0) ? (nIter / (float)attempts) : 0.0f;
+
                     DMLogF(
-                        "[DM][SHOWDOWN MULTIWAY] street=%s pot=%d possibleWinnings=%.2f opponents=%d validRuns=%d targetRuns=%d EV=%.6f nodeChance=%.6f",
+                        "[DM][SHOWDOWN MULTIWAY] street=%s pot=%d possibleWinnings=%.2f opponents=%d validRuns=%d targetRuns=%d attempts=%d acceptance=%.4f EV=%.6f nodeChance=%.6f",
                         DMStreetName(prms.street),
                         DMDebugPotSize(prms),
                         possibleWinnings,
                         nOpponents,
                         nIter,
                         SHOWDOWN_ITERATIONS,
+                        attempts,
+                        acceptance,
                         EV,
                         prms.nodeChance
                     );
@@ -1013,36 +1146,18 @@ namespace G5Cpp
 
             int turn = prms.board.card[3].toInt();
 
-            const AllHandStrengths& handStrenghts = prms.gc.allHandStrengths();
+            bool baseBlocked[52];
+            DMBuildBaseBlockedCards(baseBlocked, prms);
 
-            int heroCurrentHandStrength = handStrenghts.getTurnHandStrength(turn, prms.heroHoleCards.toInt());
-            const int* heroSortedRivers = handStrenghts.getSortedRivers(turn, prms.heroHoleCards.toInt());
+            const AllHandStrengths& handStrenghts = prms.gc.allHandStrengths();
             const int* heroRiverStrengths = handStrenghts.getRiverHandStrengths(turn, prms.heroHoleCards.toInt());
 
-            bool isHeroCard[52];
-            bool isOppCard[52];
-            bool isBoardCard[52];
-
-            for (int i = 0; i < 52; i++)
-            {
-                isHeroCard[i] = false;
-                isOppCard[i] = false;
-                isBoardCard[i] = false;
-            }
-
-            isHeroCard[prms.heroHoleCards.Card0.toInt()] = true;
-            isHeroCard[prms.heroHoleCards.Card1.toInt()] = true;
-
-            isBoardCard[prms.board.card[0].toInt()] = true;
-            isBoardCard[prms.board.card[1].toInt()] = true;
-            isBoardCard[prms.board.card[2].toInt()] = true;
-            isBoardCard[prms.board.card[3].toInt()] = true;
-
+            float possibleWinnings = prms.getPossibleWinnings();
             float EV = 0.0f;
 
             if (nOpponents == 0) // Everybody has folded except us -> go out
             {
-                EV = prms.getPossibleWinnings();
+                EV = possibleWinnings;
             }
             else if (nOpponents == 1)
             {
@@ -1050,88 +1165,77 @@ namespace G5Cpp
                 const int* oppRangeHCInd = opponents[0]->range().hcIndex();
                 const float* oppRangeLikelihood = opponents[0]->range().likelihood();
 
-                float possibleWinnings = prms.getPossibleWinnings();
                 float totalWinnings = 0.0f;
+                float likelihoodSum = 0.0f;
 
                 int nRiversChecked = 0;
                 int nIter = 0;
 
                 for (int i = 0; i < oppRangeLength; i++)
                 {
-                    if (oppRangeLikelihood[i] == 0.0f)
+                    float w = oppRangeLikelihood[i];
+
+                    if (!(w > 0.0f) || !std::isfinite(w))
                         continue;
 
-                    HoleCards oppHoleCards = HoleCards(oppRangeHCInd[i]);
-                    isOppCard[oppHoleCards.Card0.toInt()] = true;
-                    isOppCard[oppHoleCards.Card1.toInt()] = true;
+                    int oppHandIndex = oppRangeHCInd[i];
 
-                    int oppCurrentHandStrength = handStrenghts.getTurnHandStrength(turn, oppRangeHCInd[i]);
-                    const int* oppSortedRivers = handStrenghts.getSortedRivers(turn, oppRangeHCInd[i]);
-                    const int* oppRiverStrengths = handStrenghts.getRiverHandStrengths(turn, oppRangeHCInd[i]);
+                    if (DMHandConflictsWithBlockedCards(oppHandIndex, baseBlocked))
+                        continue;
 
-                    float ahead = 0;
+                    HoleCards oppHoleCards(oppHandIndex);
+                    bool blockedForRun[52];
 
-                    if (heroCurrentHandStrength < oppCurrentHandStrength) // Hero is behind
+                    for (int c = 0; c < 52; c++)
+                        blockedForRun[c] = baseBlocked[c];
+
+                    blockedForRun[oppHoleCards.Card0.toInt()] = true;
+                    blockedForRun[oppHoleCards.Card1.toInt()] = true;
+
+                    const int* oppRiverStrengths = handStrenghts.getRiverHandStrengths(turn, oppHandIndex);
+
+                    float heroShareSum = 0.0f;
+                    int validRivers = 0;
+
+                    for (int river = 0; river < 52; river++)
                     {
-                        for (int k = 0, river = heroSortedRivers[0];; river = heroSortedRivers[++k])
+                        if (blockedForRun[river])
+                            continue;
+
+                        int heroStrength = heroRiverStrengths[river];
+                        int oppStrength = oppRiverStrengths[river];
+
+                        if (heroStrength > oppStrength)
                         {
-                            int heroStrength = heroRiverStrengths[river];
-
-                            if (heroStrength == -1 || heroStrength < oppCurrentHandStrength)
-                                break;
-
-                            if (isOppCard[river])
-                                continue;
-
-                            assert(!isBoardCard[river]);
-
-                            nRiversChecked++;
-                            updateAhead(ahead, heroStrength, oppRiverStrengths[river]);
+                            heroShareSum += 1.0f;
                         }
-                    }
-                    else if (heroCurrentHandStrength > oppCurrentHandStrength) // Opp is behind
-                    {
-                        ahead = 44;
-
-                        for (int k = 0, river = oppSortedRivers[0];; river = oppSortedRivers[++k])
+                        else if (heroStrength == oppStrength)
                         {
-                            int oppStrength = oppRiverStrengths[river];
-
-                            if (oppStrength == -1 || oppStrength < heroCurrentHandStrength)
-                                break;
-
-                            if (isHeroCard[river])
-                                continue;
-
-                            assert(!isBoardCard[river]);
-
-                            ahead--;
-                            nRiversChecked++;
-                            updateAhead(ahead, heroRiverStrengths[river], oppStrength);
+                            heroShareSum += 0.5f;
                         }
-                    }
-                    else // Its tie, check all cards
-                    {
-                        for (int river = 0; river < 52; river++)
-                        {
-                            if (isHeroCard[river] || isOppCard[river] || isBoardCard[river])
-                                continue;
 
-                            nRiversChecked++;
-                            updateAhead(ahead, heroRiverStrengths[river], oppRiverStrengths[river]);
-                        }
+                        validRivers++;
+                        nRiversChecked++;
                     }
 
-                    isOppCard[oppHoleCards.Card0.toInt()] = false;
-                    isOppCard[oppHoleCards.Card1.toInt()] = false;
+                    if (validRivers <= 0)
+                        continue;
 
-                    totalWinnings += oppRangeLikelihood[i] * possibleWinnings * (ahead / 44);
+                    float equity = heroShareSum / validRivers;
+                    totalWinnings += w * possibleWinnings * equity;
+                    likelihoodSum += w;
                     nIter++;
                 }
 
+                if (likelihoodSum <= 0.0f)
+                {
+                    DMLogAlways("FATAL: likelihoodSum <= 0 em turn cutoff HU.");
+                    throw std::runtime_error("DecisionMaking: likelihoodSum <= 0 em turn cutoff HU");
+                }
+
                 stats.turnCutOff_NumPots += 1;
-                stats.turnCutOff_NumRiversChecked += nRiversChecked / (float)nIter;
-                EV = totalWinnings;
+                stats.turnCutOff_NumRiversChecked += (nIter > 0) ? (nRiversChecked / (float)nIter) : 0.0f;
+                EV = totalWinnings / likelihoodSum;
 
                 if (DMShouldLog(&g_DMTurnCutoffLogCount, DM_MAX_TURNCUTOFF_LOGS))
                 {
@@ -1139,7 +1243,7 @@ namespace G5Cpp
                     float normalizedTurnEquity = (possibleWinnings > 0.0f) ? (EV / possibleWinnings) : 0.0f;
 
                     DMLogF(
-                        "[DM][TURN CUTOFF HU] pot=%d possibleWinnings=%.2f oppRangeLen=%d activeCombos=%d avgRiversChecked=%.2f normalizedTurnEquity=%.6f EV=%.6f nodeChance=%.6f",
+                        "[DM][TURN CUTOFF HU EXACT] pot=%d possibleWinnings=%.2f oppRangeLen=%d activeCombos=%d avgRiversChecked=%.2f normalizedTurnEquity=%.6f EV=%.6f nodeChance=%.6f",
                         DMDebugPotSize(prms),
                         possibleWinnings,
                         oppRangeLength,
@@ -1153,207 +1257,116 @@ namespace G5Cpp
             }
             else // nOpponents >= 2
             {
-                int opponentHandIndexes[MAX_PLAYERS * TCUTOFF_BIN_COUNT];
+                DMRangeSampler samplers[MAX_PLAYERS];
 
                 for (int i = 0; i < nOpponents; i++)
                 {
-                    opponents[i]->range_FillHandIndices(&opponentHandIndexes[i * TCUTOFF_BIN_COUNT], TCUTOFF_BIN_COUNT);
+                    DMBuildRangeSampler(samplers[i], *opponents[i], baseBlocked, "turn cutoff multiway");
                 }
 
-                int opponentHoleCardsInd[MAX_PLAYERS];
-                HoleCards opponentHoleCards[MAX_PLAYERS];
                 Pot pot(prms._players);
                 ParkMillerCarta rng(1);
 
                 float totalWinnings = 0.0f;
                 int nRiversChecked = 0;
                 int nIter = 0;
+                int attempts = 0;
 
-                for (int attempts = 0; nIter < TCUTOFF_ITERATIONS && attempts < TCUTOFF_ITERATIONS * 200; attempts++)
+                for (attempts = 0; nIter < TCUTOFF_ITERATIONS && attempts < TCUTOFF_ITERATIONS * 300; attempts++)
                 {
-                    // Choose opponent hole cards randomly
-                    for (int j = 0; j < nOpponents; j++)
-                    {
-                        int ind = rng.next() % TCUTOFF_BIN_COUNT;
-                        opponentHoleCardsInd[j] = opponentHandIndexes[j * TCUTOFF_BIN_COUNT + ind];
-                        opponentHoleCards[j] = HoleCards(opponentHoleCardsInd[j]);
-                    }
+                    bool usedOpponentCards[52];
 
+                    for (int c = 0; c < 52; c++)
+                        usedOpponentCards[c] = false;
+
+                    int opponentHoleCardsInd[MAX_PLAYERS];
+                    const int* oppRiverStrengths[MAX_PLAYERS];
                     bool iterationValid = true;
 
-                    // Ban choosen hole cards and check if combinationis is valid
                     for (int j = 0; j < nOpponents; j++)
                     {
-                        int ind0 = opponentHoleCards[j].Card0.toInt();
-                        int ind1 = opponentHoleCards[j].Card1.toInt();
+                        int c0 = -1;
+                        int c1 = -1;
+                        int sampledHand = DMSampleHandIndex(samplers[j], rng);
 
-                        if (isHeroCard[ind0] || isHeroCard[ind1] ||
-                            isBoardCard[ind0] || isBoardCard[ind1] ||
-                            isOppCard[ind0] || isOppCard[ind1] ||
-                            ind0 == ind1)
+                        if (!DMTryReserveOpponentHand(sampledHand, baseBlocked, usedOpponentCards, c0, c1))
                         {
                             iterationValid = false;
+                            break;
                         }
 
-                        isOppCard[ind0] = true;
-                        isOppCard[ind1] = true;
+                        opponentHoleCardsInd[j] = sampledHand;
+                        oppRiverStrengths[j] = handStrenghts.getRiverHandStrengths(turn, sampledHand);
                     }
 
-                    // If combination is valid calculate EV... Choose some rivers to check...
-                    if (iterationValid)
+                    if (!iterationValid)
+                        continue;
+
+                    int validRivers = 0;
+                    float iterationWinnings = 0.0f;
+
+                    for (int river = 0; river < 52; river++)
                     {
-                        int oppCurrentHandStrength[MAX_PLAYERS];
-                        const int* oppSortedRivers[MAX_PLAYERS];
-                        const int* oppRiverStrengths[MAX_PLAYERS];
+                        if (baseBlocked[river] || usedOpponentCards[river])
+                            continue;
 
-                        for (int j = 0; j < nOpponents; j++)
-                        {
-                            oppCurrentHandStrength[j] = handStrenghts.getTurnHandStrength(turn, opponentHoleCardsInd[j]);
-                            oppSortedRivers[j] = handStrenghts.getSortedRivers(turn, opponentHoleCardsInd[j]);
-                            oppRiverStrengths[j] = handStrenghts.getRiverHandStrengths(turn, opponentHoleCardsInd[j]);
-                        }
+                        int heroStrength = heroRiverStrengths[river];
 
-                        // For all pots and side pots calculate separatelly...
                         for (int ip = 0; ip < pot.numPots(); ip++)
                         {
                             if (prms.hero().moneyInPot() < pot.getHeight(ip))
                                 break;
 
-                            int maxOppCurrHandStrength = 0;
+                            int maxOppStrength = 0;
+                            int tiedOpponents = 0;
 
                             for (int j = 0; j < nOpponents; j++)
                             {
-                                if (opponents[j]->moneyInPot() >= pot.getHeight(ip))
-                                    maxOppCurrHandStrength = (std::max)(maxOppCurrHandStrength, oppCurrentHandStrength[j]);
-                            }
-
-                            // If there is no-one but us fighting for this pot continue
-                            if (maxOppCurrHandStrength == 0)
-                            {
-                                totalWinnings += pot.getMoney(ip);
-                                continue;
-                            }
-
-                            float ahead = 0;
-                            bool riverToCheck[52];
-
-                            for (int k = 0; k < 52; k++)
-                            {
-                                riverToCheck[k] = false;
-                            }
-
-                            if (heroCurrentHandStrength < maxOppCurrHandStrength) // Hero is behind, check all rivers that make us possible ahead
-                            {
-                                for (int k = 0, river = heroSortedRivers[0];; river = heroSortedRivers[++k])
-                                {
-                                    int heroStrength = heroRiverStrengths[river];
-
-                                    if (heroStrength == -1 || heroStrength < maxOppCurrHandStrength)
-                                        break;
-
-                                    if (isOppCard[river])
-                                        continue;
-
-                                    assert(!isBoardCard[river]);
-                                    riverToCheck[river] = true;
-                                }
-                            }
-                            else if (heroCurrentHandStrength > maxOppCurrHandStrength) // Hero is ahead, check all cards that make oppontent ahead
-                            {
-                                ahead = (float)(46 - nOpponents * 2);
-
-                                for (int j = 0; j < nOpponents; j++)
-                                {
-                                    if (opponents[j]->moneyInPot() < pot.getHeight(ip))
-                                        continue;
-
-                                    for (int k = 0, river = oppSortedRivers[j][0];; river = oppSortedRivers[j][++k])
-                                    {
-                                        int oppStrength = oppRiverStrengths[j][river];
-
-                                        if (oppStrength == -1 || oppStrength < heroCurrentHandStrength)
-                                            break;
-
-                                        if (isHeroCard[river] || isOppCard[river] || riverToCheck[river])
-                                            continue;
-
-                                        assert(!isBoardCard[river]);
-
-                                        ahead -= 1;
-                                        riverToCheck[river] = true;
-                                    }
-                                }
-                            }
-                            else // heroCurrentHandStrength == maxOppCurrHandStrength, check all rivers
-                            {
-                                for (int river = 0; river < 52; river++)
-                                {
-                                    if (isHeroCard[river] || isOppCard[river] || isBoardCard[river])
-                                        continue;
-
-                                    riverToCheck[river] = true;
-                                }
-                            }
-
-                            for (int river = 0; river < 52; river++)
-                            {
-                                if (!riverToCheck[river])
+                                if (opponents[j]->moneyInPot() < pot.getHeight(ip))
                                     continue;
 
-                                int maxOppStrength = 0;
-                                int tiedOpponents = 0;
+                                int oppStrength = oppRiverStrengths[j][river];
 
-                                for (int j = 0; j < nOpponents; j++)
+                                if (oppStrength > maxOppStrength)
                                 {
-                                    if (opponents[j]->moneyInPot() < pot.getHeight(ip))
-                                        continue;
-
-                                    int oppStrength = oppRiverStrengths[j][river];
-
-                                    if (oppStrength > maxOppStrength)
-                                    {
-                                        maxOppStrength = oppStrength;
-                                        tiedOpponents = 1;
-                                    }
-                                    else if (oppStrength == maxOppStrength)
-                                    {
-                                        tiedOpponents++;
-                                    }
+                                    maxOppStrength = oppStrength;
+                                    tiedOpponents = 1;
                                 }
-
-                                if (heroRiverStrengths[river] > maxOppStrength)
+                                else if (oppStrength == maxOppStrength)
                                 {
-                                    ahead += 1.0f;
+                                    tiedOpponents++;
                                 }
-                                else if (heroRiverStrengths[river] == maxOppStrength)
-                                {
-                                    ahead += 1.0f / (tiedOpponents + 1);
-                                }
-
-                                nRiversChecked++;
                             }
 
-                            totalWinnings += pot.getMoney(ip) * ahead / (46 - nOpponents * 2);
+                            float heroShare = 0.0f;
+
+                            if (maxOppStrength == 0 || heroStrength > maxOppStrength)
+                            {
+                                heroShare = 1.0f;
+                            }
+                            else if (heroStrength == maxOppStrength)
+                            {
+                                heroShare = 1.0f / (tiedOpponents + 1);
+                            }
+
+                            iterationWinnings += pot.getMoney(ip) * heroShare;
                         }
 
-                        nIter++;
+                        validRivers++;
                     }
 
-                    // Un-ban chosen hole cards
-                    for (int j = 0; j < nOpponents; j++)
-                    {
-                        int ind0 = opponentHoleCards[j].Card0.toInt();
-                        int ind1 = opponentHoleCards[j].Card1.toInt();
+                    if (validRivers <= 0)
+                        continue;
 
-                        isOppCard[ind0] = false;
-                        isOppCard[ind1] = false;
-                    }
+                    totalWinnings += iterationWinnings / validRivers;
+                    nRiversChecked += validRivers;
+                    nIter++;
                 }
 
                 if (nIter <= 0)
                 {
-                    DMLogAlways("FATAL: nIter == 0 em amostragem multiway. Nenhuma combinacao valida de cartas dos oponentes foi encontrada.");
-                    throw std::runtime_error("DecisionMaking: nIter == 0 em amostragem multiway");
+                    DMLogAlways("FATAL: nIter == 0 em turn cutoff multiway. Nenhuma combinacao valida de cartas dos oponentes foi encontrada.");
+                    throw std::runtime_error("DecisionMaking: nIter == 0 em turn cutoff multiway");
                 }
 
                 stats.turnCutOff_NumRiversChecked += nRiversChecked / (float)nIter;
@@ -1364,13 +1377,16 @@ namespace G5Cpp
                 if (DMShouldLog(&g_DMTurnCutoffLogCount, DM_MAX_TURNCUTOFF_LOGS))
                 {
                     float avgRiversChecked = (nIter > 0) ? (nRiversChecked / (float)nIter) : 0.0f;
+                    float acceptance = (attempts > 0) ? (nIter / (float)attempts) : 0.0f;
 
                     DMLogF(
-                        "[DM][TURN CUTOFF MULTIWAY] pot=%d opponents=%d validRuns=%d targetRuns=%d avgRiversChecked=%.2f pots=%d EV=%.6f nodeChance=%.6f",
+                        "[DM][TURN CUTOFF MULTIWAY EXACT-RIVER] pot=%d opponents=%d validRuns=%d targetRuns=%d attempts=%d acceptance=%.4f avgRiversChecked=%.2f pots=%d EV=%.6f nodeChance=%.6f",
                         DMDebugPotSize(prms),
                         nOpponents,
                         nIter,
                         TCUTOFF_ITERATIONS,
+                        attempts,
+                        acceptance,
                         avgRiversChecked,
                         pot.numPots(),
                         EV,
@@ -1550,8 +1566,8 @@ namespace G5Cpp
             bigBlindSize
         );
 
-        // Inicializa os EVs para valores reconhec?veis.
-        // Estes valores N?O devem ser usados como decis?o, servem apenas para diagn?stico
+        // Inicializa os EVs para valores reconhec�veis.
+        // Estes valores N�O devem ser usados como decis�o, servem apenas para diagn�stico
         // caso a chamada seja interrompida antes de calcular os EVs reais.
         checkCallEV = -999999.0f;
         betRaiseEV = -999999.0f;
