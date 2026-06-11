@@ -1006,6 +1006,8 @@ public string getPreFlopChartsInfo()
             public float betRaiseEV;
             public double timeSpentSeconds;
             public string message;
+            public bool usedMultiSizeEV;
+            public string sizingReport;
         }
 
         private ActionType randomSampleAction(float brEv, float ccEv)
@@ -1187,6 +1189,146 @@ public string getPreFlopChartsInfo()
         }
 
 
+        private bool canHeroBetRaiseNow()
+        {
+            if (_playerToActInd != _heroInd)
+                return false;
+
+            if (_numBets >= 4)
+                return false;
+
+            if (getAmountToCall() >= getHero().Stack)
+                return false;
+
+            if (numActiveNonAllInPlayers() <= 1)
+                return false;
+
+            return true;
+        }
+
+        private List<int> buildPostFlopBetRaiseCandidates()
+        {
+            List<int> candidates = new List<int>();
+
+            if (_street == Street.PreFlop || !canHeroBetRaiseNow())
+                return candidates;
+
+            int amountToCall = getAmountToCall();
+            int pot = potSize();
+            int stack = getHero().Stack;
+            int basePot = Math.Max(1, pot + amountToCall);
+            int minBet = Math.Max(1, _bigBlingSize);
+
+            Action<int> addCandidate = (amount) =>
+            {
+                if (stack <= 0)
+                    return;
+
+                if (amountToCall > 0 && amount <= amountToCall)
+                    amount = amountToCall + minBet;
+
+                if (amountToCall == 0 && amount < minBet)
+                    amount = minBet;
+
+                if (amount > stack)
+                    amount = stack;
+
+                if (amount <= 0)
+                    return;
+
+                if (!candidates.Contains(amount))
+                    candidates.Add(amount);
+            };
+
+            addCandidate(getRaiseAmount());
+
+            float[] fractions = (amountToCall == 0)
+                ? new float[] { 0.33f, 0.50f, 0.66f, 0.75f, 1.00f }
+                : new float[] { 0.50f, 0.75f, 1.00f, 1.25f, 1.50f };
+
+            foreach (float fraction in fractions)
+            {
+                int amount = amountToCall + (int)Math.Round(basePot * fraction);
+                addCandidate(amount);
+            }
+
+            float spr = stack / (float)Math.Max(1, pot);
+            if (spr <= 2.0f || stack <= (int)Math.Round(basePot * 1.50f))
+                addCandidate(stack);
+
+            candidates.Sort();
+
+            // Mantem a arvore sob controle. Evita multiplicar demais o tempo de decisao.
+            if (candidates.Count > 5)
+            {
+                List<int> reduced = new List<int>();
+                reduced.Add(candidates[0]);
+                reduced.Add(candidates[candidates.Count / 4]);
+                reduced.Add(candidates[candidates.Count / 2]);
+                reduced.Add(candidates[(3 * candidates.Count) / 4]);
+                reduced.Add(candidates[candidates.Count - 1]);
+
+                candidates = reduced.Distinct().OrderBy(x => x).ToList();
+            }
+
+            return candidates;
+        }
+
+        private bool tryEvaluatePostFlopMultiSizeEV(ref BotDecision bd)
+        {
+            if (_street == Street.PreFlop)
+                return false;
+
+            if (!canHeroBetRaiseNow())
+                return false;
+
+            var modelingEstimator = _actionEstimator as Estimators.ModelingEstimator;
+            if (modelingEstimator == null)
+                return false;
+
+            List<int> candidates = buildPostFlopBetRaiseCandidates();
+            if (candidates.Count == 0)
+                return false;
+
+            float bestBetRaiseEV = float.NegativeInfinity;
+            float bestCheckCallEV = bd.checkCallEV;
+            int bestAmount = 0;
+            StringBuilder report = new StringBuilder();
+
+            report.Append(" -> Multi-size EV tree ativada. Candidatos: ");
+            report.Append(string.Join(", ", candidates));
+            report.Append(".\n");
+
+            foreach (int amount in candidates)
+            {
+                float candidateCheckCallEV;
+                float candidateBetRaiseEV;
+
+                modelingEstimator.estimateEVForBetRaiseAmount(out candidateCheckCallEV, out candidateBetRaiseEV, this, amount);
+
+                report.Append($"    size={amount}: ccEV={candidateCheckCallEV:F2}, brEV={candidateBetRaiseEV:F2}\n");
+
+                if (bestAmount == 0 || candidateBetRaiseEV > bestBetRaiseEV)
+                {
+                    bestAmount = amount;
+                    bestBetRaiseEV = candidateBetRaiseEV;
+                    bestCheckCallEV = candidateCheckCallEV;
+                }
+            }
+
+            if (bestAmount <= 0 || float.IsNegativeInfinity(bestBetRaiseEV))
+                return false;
+
+            bd.checkCallEV = bestCheckCallEV;
+            bd.betRaiseEV = bestBetRaiseEV;
+            bd.byAmount = bestAmount;
+            bd.usedMultiSizeEV = true;
+            bd.sizingReport = report.ToString();
+            bd.message += report.ToString();
+
+            return true;
+        }
+
         public BotDecision calculateHeroAction()
         {
             int nOfOpponents = numActivePlayers() - 1;
@@ -1198,7 +1340,9 @@ public string getPreFlopChartsInfo()
                 betRaiseEV = 0.0f,
                 checkCallEV = 0.0f,
                 timeSpentSeconds = 0,
-                message = ""
+                message = "",
+                usedMultiSizeEV = false,
+                sizingReport = ""
             };
 
             if (_playerToActInd != _heroInd)
@@ -1228,6 +1372,11 @@ public string getPreFlopChartsInfo()
                 // If amountToCall is 0, it can check
                 bd.checkCallEV = -amountToCall;
                 bd.betRaiseEV = -10.0f;
+            }
+
+            if (_street > Street.PreFlop && nOfOpponents < 4)
+            {
+                tryEvaluatePostFlopMultiSizeEV(ref bd);
             }
 
             // Try to read preflop charts
@@ -1292,7 +1441,8 @@ if (_numBets == 0 && _numCallers > 0)
             }
 
             bd.timeSpentSeconds = (DateTime.Now - startTime).TotalSeconds;
-            bd.byAmount = 0;
+            if (!bd.usedMultiSizeEV)
+                bd.byAmount = 0;
 
             // If both EVs are less than zero then fold
             if (bd.actionType == ActionType.Fold)
@@ -1317,7 +1467,10 @@ if (_numBets == 0 && _numCallers > 0)
             }
             else // its raise
             {
-                bd.byAmount = calculatePostFlopBetRaiseAmount(bd.checkCallEV, bd.betRaiseEV);
+                if (bd.byAmount <= 0)
+                    bd.byAmount = calculatePostFlopBetRaiseAmount(bd.checkCallEV, bd.betRaiseEV);
+                else if (bd.usedMultiSizeEV)
+                    bd.message += $" -> Melhor sizing por EV multi-size: {bd.byAmount}.\n";
             }
 
             if ((3 * bd.byAmount / 2) >= _players[_heroInd].Stack)

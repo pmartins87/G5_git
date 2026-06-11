@@ -272,6 +272,13 @@ namespace G5Cpp
 
         const float NODE_CHANCE_CUTOFF = 0.0f; // 0.01f;
 
+        // Phase 6A: optional root-only forced bet/raise amount.
+        // Used only by EstimateEVForBetRaiseAmount to evaluate candidate sizings.
+        // The flag is consumed at the root hero node before evaluating the check/call branch,
+        // so recursive future hero decisions keep their normal default sizing.
+        static bool g_DMForceRootBetRaiseAmount = false;
+        static int g_DMForcedRootBetRaiseAmount = 0;
+
         const char* DMStreetName(Street street)
         {
             switch (street)
@@ -474,10 +481,7 @@ namespace G5Cpp
                 numShowDowns += stats.numShowDowns;
                 showDown_NumValidRuns += stats.showDown_NumValidRuns;
 
-                for (const auto& node : leafLog)
-                {
-                    leafLog.push_back(node);
-                }
+                leafLog.insert(leafLog.end(), stats.leafLog.begin(), stats.leafLog.end());
             }
 
             void saveToFile(const char* filename)
@@ -512,6 +516,14 @@ namespace G5Cpp
             int callCost = prms.getAmountToCall();
             bool canRaise = prms.canNextPlayerRaise();
             int raiseAmount = canRaise ? DMDebugRaiseAmount(prms, callCost) : 0;
+            int forcedRootBetRaiseAmount = 0;
+
+            if (g_DMForceRootBetRaiseAmount)
+            {
+                forcedRootBetRaiseAmount = g_DMForcedRootBetRaiseAmount;
+                g_DMForceRootBetRaiseAmount = false;
+                g_DMForcedRootBetRaiseAmount = 0;
+            }
 
             if (logHeroNode)
             {
@@ -546,14 +558,27 @@ namespace G5Cpp
             // Can hero raise
             if (canRaise)
             {
-                GameState newPrms = prms.playerBetRaises(0, 0, 1.0f);
-                betRaiseTreeEV = estimateEV(stats, newPrms);
-                raiseCost = newPrms.hero().moneyInPot() - prms.hero().moneyInPot();
-                betRaiseEV = betRaiseTreeEV - raiseCost;
+                if (forcedRootBetRaiseAmount > 0)
+                {
+                    GameState newPrms = prms.playerBetRaises(0, 0, 1.0f, forcedRootBetRaiseAmount);
+                    betRaiseTreeEV = estimateEV(stats, newPrms);
+                    raiseCost = newPrms.hero().moneyInPot() - prms.hero().moneyInPot();
+                    betRaiseEV = betRaiseTreeEV - raiseCost;
+                }
+                else
+                {
+                    GameState newPrms = prms.playerBetRaises(0, 0, 1.0f);
+                    betRaiseTreeEV = estimateEV(stats, newPrms);
+                    raiseCost = newPrms.hero().moneyInPot() - prms.hero().moneyInPot();
+                    betRaiseEV = betRaiseTreeEV - raiseCost;
+                }
             }
 
             if (logHeroNode)
             {
+                if (forcedRootBetRaiseAmount > 0)
+                    DMLogF("[DM][HERO FORCED SIZE] forcedRootBetRaiseAmount=%d", forcedRootBetRaiseAmount);
+
                 DMLogF(
                     "[DM][HERO EV] street=%s(%d) checkCallTreeEV=%.6f callCost=%d checkCallEV=%.6f betRaiseTreeEV=%.6f raiseCost=%d betRaiseEV=%.6f",
                     DMStreetName(prms.street),
@@ -584,7 +609,7 @@ namespace G5Cpp
             float predCheckCallProb = ad.checkCallProb;
             float predBetRaiseProb = ad.betRaiseProb;
 
-            if (prms.street > Street_PreFlop && false) // Predict actions only in post flop
+            if (prms.street > Street_PreFlop) // Predict postflop actions from the current weighted range and board.
             {
                 if (amountToCall > 0)
                 {
@@ -1525,8 +1550,8 @@ namespace G5Cpp
             bigBlindSize
         );
 
-        // Inicializa os EVs para valores reconhecíveis.
-        // Estes valores NÃO devem ser usados como decisão, servem apenas para diagnóstico
+        // Inicializa os EVs para valores reconhec?veis.
+        // Estes valores N?O devem ser usados como decis?o, servem apenas para diagn?stico
         // caso a chamada seja interrompida antes de calcular os EVs reais.
         checkCallEV = -999999.0f;
         betRaiseEV = -999999.0f;
@@ -1712,4 +1737,27 @@ namespace G5Cpp
             DMFatal("FATAL: interrompendo EstimateEV apos excecao desconhecida");
         }
     }
+
+    extern "C" G5_EXPORT void __stdcall EstimateEVForBetRaiseAmount(float& checkCallEV, float& betRaiseEV, int forcedBetRaiseAmount, int buttonInd, int heroIndex, const HoleCards& heroHoleCards,
+        const PlayerDTO* players, int nPlayers, const Card* cardsInBoard, Street street, int numBets, int numCallers, int bigBlindSize, const void* gc)
+    {
+        if (forcedBetRaiseAmount > 0)
+        {
+            g_DMForcedRootBetRaiseAmount = forcedBetRaiseAmount;
+            g_DMForceRootBetRaiseAmount = true;
+            DMLogF("[DM][MULTISIZE ROOT] forcedBetRaiseAmount=%d", forcedBetRaiseAmount);
+        }
+        else
+        {
+            g_DMForcedRootBetRaiseAmount = 0;
+            g_DMForceRootBetRaiseAmount = false;
+        }
+
+        EstimateEV(checkCallEV, betRaiseEV, buttonInd, heroIndex, heroHoleCards,
+            players, nPlayers, cardsInBoard, street, numBets, numCallers, bigBlindSize, gc);
+
+        g_DMForcedRootBetRaiseAmount = 0;
+        g_DMForceRootBetRaiseAmount = false;
+    }
+
 }

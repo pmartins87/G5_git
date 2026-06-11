@@ -1,9 +1,20 @@
-﻿  DecisionMaking.cpp
+﻿  AllCounters.cpp
+  AllHandStrengths.cpp
+  Card.cpp
+  Common.cpp
+  DecisionMaking.cpp
+  dllmain.cpp
   ForExport.cpp
   GameContext.cpp
   GameState.cpp
+  HandStrength.cpp
+  HandStrengthCounter.cpp
+  PlayerModel.cpp
+  PostFlopParams.cpp
   Pot.cpp
   PreFlopEquity.cpp
+  PreFlopParams.cpp
   Range.cpp
   Gerando Código...
+     Criando biblioteca C:\Users\Caixa\Desktop\personal\g5_git\src\Release\DecisionMaking.lib e objeto C:\Users\Caixa\Desktop\personal\g5_git\src\Release\DecisionMaking.exp
   DecisionMaking.vcxproj -> C:\Users\Caixa\Desktop\personal\g5_git\src\Release\DecisionMaking.dll

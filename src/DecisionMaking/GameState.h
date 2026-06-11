@@ -19,6 +19,7 @@ namespace G5Cpp
         bool areBetsLeft() const;
         int potSize() const;
         int getRaiseAmount() const;
+        int normalizeBetRaiseAmount(int requestedAmount) const;
         int numActiveNonAllInPlayers() const;
 
     public:
@@ -66,6 +67,7 @@ namespace G5Cpp
         GameState goToNextStreet(const Card& card) const;
         GameState playerCheckCalls(float betRaiseProb, float checkCallProb, float nodeProbability) const;
         GameState playerBetRaises(float betRaiseProb, float checkCallProb, float nodeProbability) const;
+        GameState playerBetRaises(float betRaiseProb, float checkCallProb, float nodeProbability, int forcedBetRaiseAmount) const;
         GameState playerFolds(float nodeProbability) const;
     };
 }

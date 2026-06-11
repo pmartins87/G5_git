@@ -160,14 +160,23 @@ namespace G5.Logic
             return cards;
         }
 
+        private static Unmanaged_Player[] PlayersToUnmanaged(List<Player> playerList)
+        {
+            Unmanaged_Player[] players = new Unmanaged_Player[playerList.Count];
+
+            for (int i = 0; i < playerList.Count; i++)
+            {
+                players[i] = new Unmanaged_Player(playerList[i], i);
+            }
+
+            return players;
+        }
 
         [DllImport("DecisionMaking.dll", EntryPoint = "CreateGameContext", CharSet = CharSet.Ansi)]
         public static extern IntPtr CreateGameContext(string binPath);
 
-
         [DllImport("DecisionMaking.dll", EntryPoint = "ReleaseGameContext", CharSet = CharSet.Ansi)]
         public static extern void ReleaseGameContext(IntPtr gc);
-
 
         [DllImport("DecisionMaking.dll", EntryPoint = "GameContext_NewFlop", CharSet = CharSet.Ansi)]
         private static extern void GameContext_NewFlop(IntPtr gc, string strFlop0, string strFlop1, string strFlop2, string strHoleCards);
@@ -180,7 +189,6 @@ namespace G5.Logic
                 board.Flop[2].ToString(),
                 (heroHoleCards != null) ? heroHoleCards.ToString() : null);
         }
-
 
         [DllImport("DecisionMaking.dll", EntryPoint = "Range_GetSortedHoleCards", CharSet = CharSet.Ansi)]
         private static extern void Range_GetSortedHoleCards(ref Unmanaged_Range range, int street,
@@ -195,7 +203,6 @@ namespace G5.Logic
             unmanagedRange.ToManaged(range);
         }
 
-
         [DllImport("DecisionMaking.dll", EntryPoint = "CutRange_CheckBet", CharSet = CharSet.Ansi)]
         private static extern void CutRange_CheckBet(ref Unmanaged_Range range, int actionType, int street,
             [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)]Unmanaged_Card[] board, float betChance, IntPtr gc);
@@ -208,7 +215,6 @@ namespace G5.Logic
             CutRange_CheckBet(ref unmanagedRange, (int)actionType, (int)street, cards, betChance, dmContext.GC);
             unmanagedRange.ToManaged(range);
         }
-
 
         [DllImport("DecisionMaking.dll", EntryPoint = "CutRange_FoldCallRaise", CharSet = CharSet.Ansi)]
         private static extern void CutRange_FoldCallRaise(ref Unmanaged_Range range, int actionType, int street,
@@ -223,7 +229,6 @@ namespace G5.Logic
             unmanagedRange.ToManaged(range);
         }
 
-
         [DllImport("DecisionMaking.dll", EntryPoint = "PredictAction_CheckBet", CharSet = CharSet.Ansi)]
         private static extern void PredictAction_CheckBet(ref float toCheck, ref float toBet, ref Unmanaged_Range range, int street,
             [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)]Unmanaged_Card[] board, float betChance, IntPtr gc);
@@ -235,7 +240,6 @@ namespace G5.Logic
 
             PredictAction_CheckBet(ref toCheck, ref toBet, ref unmanagedRange, (int)street, cards, betChance, dmContext.GC);
         }
-
 
         [DllImport("DecisionMaking.dll", EntryPoint = "PredictAction_FoldCallRaise", CharSet = CharSet.Ansi)]
         private static extern void PredictAction_FoldCallRaise(ref float toFold, ref float toCall, ref float toRaise, ref Unmanaged_Range range, int street,
@@ -250,7 +254,6 @@ namespace G5.Logic
             PredictAction_FoldCallRaise(ref toFold, ref toCall, ref toRaise, ref unmanagedRange, (int)street, cards, raiseChance, callChance, dmContext.GC);
         }
 
-
         [DllImport("DecisionMaking.dll", EntryPoint = "Range_CutDistribution_CheckBet", CharSet = CharSet.Ansi)]
         private static extern void Range_CutDistribution_CheckBet(
             [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)]float[] checkDistribution,
@@ -260,7 +263,6 @@ namespace G5.Logic
         {
             Range_CutDistribution_CheckBet(checkDistribution, betDistribution, checkDistribution.Length, (int)street, betChance);
         }
-
 
         [DllImport("DecisionMaking.dll", EntryPoint = "Range_CutDistribution_FoldCallRaise", CharSet = CharSet.Ansi)]
         private static extern void Range_CutDistribution_FoldCallRaise(
@@ -273,9 +275,14 @@ namespace G5.Logic
             Range_CutDistribution_FoldCallRaise(foldDistribution, callDistribution, raiseDistribution, foldDistribution.Length, (int)street, raiseChance, callChance);
         }
 
-
         [DllImport("DecisionMaking.dll", EntryPoint = "EstimateEV", CharSet = CharSet.Ansi)]
         private static extern void EstimateEV(ref float checkCallEV, ref float betRaiseEV, int buttonInd, int heroIndex, ref Unmanaged_HoleCards heroHoleCards,
+            [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)]Unmanaged_Player[] players, int nPlayers,
+            [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)]Unmanaged_Card[] board,
+            int street, int numBets, int numCallers, int bigBlindSize, IntPtr gc);
+
+        [DllImport("DecisionMaking.dll", EntryPoint = "EstimateEVForBetRaiseAmount", CharSet = CharSet.Ansi)]
+        private static extern void EstimateEVForBetRaiseAmount(ref float checkCallEV, ref float betRaiseEV, int forcedBetRaiseAmount, int buttonInd, int heroIndex, ref Unmanaged_HoleCards heroHoleCards,
             [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)]Unmanaged_Player[] players, int nPlayers,
             [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)]Unmanaged_Card[] board,
             int street, int numBets, int numCallers, int bigBlindSize, IntPtr gc);
@@ -284,19 +291,27 @@ namespace G5.Logic
             List<Player> playerList, Board board, Street street, int numBets, int numCallers, int bigBlindSize, DecisionMakingContext dmContext)
         {
             Unmanaged_HoleCards uHoleCards = new Unmanaged_HoleCards(heroHoleCards);
-            Unmanaged_Player[] players = new Unmanaged_Player[playerList.Count];
-
-            for (int i = 0; i < playerList.Count; i++)
-            {
-                players[i] = new Unmanaged_Player(playerList[i], i);
-            }
-
+            Unmanaged_Player[] players = PlayersToUnmanaged(playerList);
             Unmanaged_Card[] cards = BoardToUnmanaged(board);
 
             checkCallEV = 0.0f;
             betRaiseEV = 0.0f;
 
             EstimateEV(ref checkCallEV, ref betRaiseEV, buttonInd, heroIndex, ref uHoleCards, players, playerList.Count, cards,
+                (int)street, numBets, numCallers, bigBlindSize, dmContext.GC);
+        }
+
+        public static void Holdem_EstimateEVForBetRaiseAmount(out float checkCallEV, out float betRaiseEV, int forcedBetRaiseAmount, int buttonInd, int heroIndex, HoleCards heroHoleCards,
+            List<Player> playerList, Board board, Street street, int numBets, int numCallers, int bigBlindSize, DecisionMakingContext dmContext)
+        {
+            Unmanaged_HoleCards uHoleCards = new Unmanaged_HoleCards(heroHoleCards);
+            Unmanaged_Player[] players = PlayersToUnmanaged(playerList);
+            Unmanaged_Card[] cards = BoardToUnmanaged(board);
+
+            checkCallEV = 0.0f;
+            betRaiseEV = 0.0f;
+
+            EstimateEVForBetRaiseAmount(ref checkCallEV, ref betRaiseEV, forcedBetRaiseAmount, buttonInd, heroIndex, ref uHoleCards, players, playerList.Count, cards,
                 (int)street, numBets, numCallers, bigBlindSize, dmContext.GC);
         }
     }

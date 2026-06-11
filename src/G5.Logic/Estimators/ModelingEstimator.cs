@@ -243,6 +243,28 @@ namespace G5.Logic.Estimators
             }*/
         }
 
+        public void estimateEVForBetRaiseAmount(out float checkCallEV, out float betRaiseEV, BotGameState gameState, int forcedBetRaiseAmount)
+        {
+            if (forcedBetRaiseAmount <= 0)
+            {
+                ((IActionEstimator)this).estimateEV(out checkCallEV, out betRaiseEV, gameState);
+                return;
+            }
+
+            DecisionMakingDll.Holdem_EstimateEVForBetRaiseAmount(out checkCallEV, out betRaiseEV,
+                forcedBetRaiseAmount,
+                gameState.getButtonInd(),
+                gameState.getHeroInd(),
+                gameState.getHeroHoleCards(),
+                gameState.getPlayers(),
+                gameState.getBoard(),
+                gameState.getStreet(),
+                gameState.getNumBets(),
+                gameState.getNumCallers(),
+                gameState.getBigBlingSize(),
+                _dmContext);
+        }
+
         void IActionEstimator.estimateEV(out float checkCallEV, out float betRaiseEV, BotGameState gameState)
         {
             DecisionMakingDll.Holdem_EstimateEV(out checkCallEV, out betRaiseEV, gameState.getButtonInd(),

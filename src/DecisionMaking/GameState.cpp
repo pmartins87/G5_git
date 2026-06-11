@@ -99,6 +99,33 @@ namespace G5Cpp
         }
     }
 
+    int GameState::normalizeBetRaiseAmount(int requestedAmount) const
+    {
+        assert(playerToActInd != -1);
+
+        int stack = playerToAct().stack();
+        int amountToCall = getAmountToCall();
+
+        if (stack <= 0)
+            return 0;
+
+        int amount = requestedAmount;
+
+        if (amount <= 0)
+            amount = getRaiseAmount();
+
+        if (amountToCall > 0 && amount < amountToCall)
+            amount = amountToCall;
+
+        if (amountToCall == 0 && amount < bigBlindSize)
+            amount = bigBlindSize;
+
+        if (amount > stack)
+            amount = stack;
+
+        return amount;
+    }
+
     int GameState::getAmountToCall() const
     {
         assert(playerToActInd != -1);
@@ -521,11 +548,16 @@ namespace G5Cpp
 
     GameState GameState::playerBetRaises(float betRaiseProb, float checkCallProb, float nodeProbability) const
     {
+        return playerBetRaises(betRaiseProb, checkCallProb, nodeProbability, 0);
+    }
+
+    GameState GameState::playerBetRaises(float betRaiseProb, float checkCallProb, float nodeProbability, int forcedBetRaiseAmount) const
+    {
         GameState newPrms(*this);
-        int raiseAmount = newPrms.getRaiseAmount();
+        int raiseAmount = newPrms.normalizeBetRaiseAmount(forcedBetRaiseAmount);
         int amountToCall = getAmountToCall();
 
-        if ((3 * raiseAmount / 2) >= newPrms.playerToAct().stack())
+        if (raiseAmount >= newPrms.playerToAct().stack())
         {
             newPrms.playerToAct().goesAllIn();
         }
@@ -539,11 +571,13 @@ namespace G5Cpp
         {
             if (amountToCall == 0)
             {
-                newPrms.playerToAct().cutRange_CheckBet(Action_Bet, newPrms.board, betRaiseProb, gc);
+                ActionType actionType = (raiseAmount >= playerToAct().stack()) ? Action_AllIn : Action_Bet;
+                newPrms.playerToAct().cutRange_CheckBet(actionType, newPrms.board, betRaiseProb, gc);
             }
             else
             {
-                newPrms.playerToAct().cutRange_FoldCallRaise(Action_Raise, newPrms.board, betRaiseProb, checkCallProb, gc);
+                ActionType actionType = (raiseAmount >= playerToAct().stack()) ? Action_AllIn : Action_Raise;
+                newPrms.playerToAct().cutRange_FoldCallRaise(actionType, newPrms.board, betRaiseProb, checkCallProb, gc);
             }
         }
 
