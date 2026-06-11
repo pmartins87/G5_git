@@ -15,6 +15,7 @@ namespace G5.Logic
     {
         private const int RAISE_SIZE_NOM = 2;
         private const int RAISE_SIZE_DEN = 3;
+        private const int ALL_IN_COMMITMENT_PERCENT = 80;
 
         private int _bigBlingSize;
         private PokerClient _pokerClient;
@@ -1010,6 +1011,19 @@ public string getPreFlopChartsInfo()
             public string sizingReport;
         }
 
+        private static bool IsAtLeastAllInCommitmentThreshold(int intendedAmount, int stack)
+        {
+            if (stack <= 0 || intendedAmount <= 0)
+                return false;
+
+            return intendedAmount * 100 >= stack * ALL_IN_COMMITMENT_PERCENT;
+        }
+
+        public static bool ShouldConvertToAllInByCommitmentForRegression(int intendedAmount, int stack)
+        {
+            return IsAtLeastAllInCommitmentThreshold(intendedAmount, stack);
+        }
+
         private ActionType randomSampleAction(float brEv, float ccEv)
         {
             // If one EV is less than 0 just return other one
@@ -1282,8 +1296,8 @@ public string getPreFlopChartsInfo()
             if (!canHeroBetRaiseNow())
                 return false;
 
-            var modelingEstimator = _actionEstimator as Estimators.ModelingEstimator;
-            if (modelingEstimator == null)
+            var sizingEstimator = _actionEstimator as Estimators.IBetRaiseAmountEstimator;
+            if (sizingEstimator == null)
                 return false;
 
             List<int> candidates = buildPostFlopBetRaiseCandidates();
@@ -1304,7 +1318,7 @@ public string getPreFlopChartsInfo()
                 float candidateCheckCallEV;
                 float candidateBetRaiseEV;
 
-                modelingEstimator.estimateEVForBetRaiseAmount(out candidateCheckCallEV, out candidateBetRaiseEV, this, amount);
+                sizingEstimator.estimateEVForBetRaiseAmount(out candidateCheckCallEV, out candidateBetRaiseEV, this, amount);
 
                 report.Append($"    size={amount}: ccEV={candidateCheckCallEV:F2}, brEV={candidateBetRaiseEV:F2}\n");
 
@@ -1644,9 +1658,9 @@ if (_numBets == 0 && _numCallers > 0)
                     bd.message += $" -> Melhor sizing por EV multi-size: {bd.byAmount}.\n";
             }
 
-            if ((3 * bd.byAmount / 2) >= _players[_heroInd].Stack)
+            if (IsAtLeastAllInCommitmentThreshold(bd.byAmount, _players[_heroInd].Stack))
             {
-                bd.message += " -> But amount to put in pot is close to (or larger than) players stack so go all in!\n";
+                bd.message += $" -> But amount to put in pot is at least {ALL_IN_COMMITMENT_PERCENT}% of player's stack, so go all in!\n";
                 bd.byAmount = _players[_heroInd].Stack;
                 bd.actionType = ActionType.AllIn;
             }

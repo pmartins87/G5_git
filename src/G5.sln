@@ -20,6 +20,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "G5Gym", "G5Gym\G5Gym.csproj
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "G5Bridge", "G5Bridge\G5Bridge\G5Bridge.csproj", "{16073DB1-1E41-47ED-9155-CBF3B28DB560}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "G5.AcademicRegressionRunner", "G5.AcademicRegressionRunner\G5.AcademicRegressionRunner.csproj", "{7899BAD8-4B35-483A-A777-F8962241D9B3}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Win32 = Debug|Win32
@@ -159,6 +161,24 @@ Global
 		{16073DB1-1E41-47ED-9155-CBF3B28DB560}.Release-final|x64.Build.0 = Release|Any CPU
 		{16073DB1-1E41-47ED-9155-CBF3B28DB560}.Release-final|x86.ActiveCfg = Release|x86
 		{16073DB1-1E41-47ED-9155-CBF3B28DB560}.Release-final|x86.Build.0 = Release|x86
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Debug|Win32.ActiveCfg = Debug|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Debug|Win32.Build.0 = Debug|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Debug|x64.Build.0 = Debug|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Debug|x86.Build.0 = Debug|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Release|Win32.ActiveCfg = Release|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Release|Win32.Build.0 = Release|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Release|x64.ActiveCfg = Release|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Release|x64.Build.0 = Release|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Release|x86.ActiveCfg = Release|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Release|x86.Build.0 = Release|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Release-final|Win32.ActiveCfg = Release|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Release-final|Win32.Build.0 = Release|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Release-final|x64.ActiveCfg = Release|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Release-final|x64.Build.0 = Release|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Release-final|x86.ActiveCfg = Release|Any CPU
+		{7899BAD8-4B35-483A-A777-F8962241D9B3}.Release-final|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

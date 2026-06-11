@@ -31,4 +31,14 @@ namespace G5.Logic.Estimators
         /// </summary>
         void estimateEV(out float checkCallEV, out float betRaiseEV, BotGameState gameState);
     }
+
+    /// <summary>
+    /// Optional estimator extension used by the academic regression suite and by the multi-size EV tree.
+    /// Implementations calculate EV for a specific first bet/raise amount at the root node.
+    /// </summary>
+    public interface IBetRaiseAmountEstimator : IActionEstimator
+    {
+        void estimateEVForBetRaiseAmount(out float checkCallEV, out float betRaiseEV, BotGameState gameState, int forcedBetRaiseAmount);
+    }
+
 }

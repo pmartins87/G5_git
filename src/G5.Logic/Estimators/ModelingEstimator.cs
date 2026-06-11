@@ -12,7 +12,7 @@ namespace G5.Logic.Estimators
     /// This is old (modeling) estimator. Estimates player model using Bayesian estimation.
     /// Than plays exploitevly to maximaze EV.
     /// </summary>
-    public class ModelingEstimator : IActionEstimator
+    public class ModelingEstimator : IBetRaiseAmountEstimator
     {
         private OpponentModeling _opponentModeling;
         private DecisionMakingContext _dmContext;
