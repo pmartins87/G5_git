@@ -202,7 +202,7 @@ namespace G5.Logic
             {
                 Range.CutCheckBet(actionType, currentStreet, board, betRaiseChance, dmContext);
             }
-            else if (actionType == ActionType.Call || actionType == ActionType.Raise || actionType == ActionType.AllIn)
+            else if (actionType == ActionType.Fold || actionType == ActionType.Call || actionType == ActionType.Raise || actionType == ActionType.AllIn)
             {
                 Range.CutFoldCallRaise(actionType, currentStreet, board, betRaiseChance, checkCallChance, dmContext);
             }

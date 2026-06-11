@@ -53,6 +53,17 @@ namespace G5Cpp
             return value;
         }
 
+        inline float AllInLikelihoodFromAggression(float aggressiveProbability)
+        {
+            aggressiveProbability = ClampFloat(aggressiveProbability, POSTFLOP_EPS, 1.0f - POSTFLOP_EPS);
+
+            // All-in is not just a normal raise: it should be a more selective/polarized
+            // observation. Squaring preserves monotonicity while compressing marginal
+            // raise candidates and keeping very aggressive combos alive.
+            return ClampFloat(0.20f * aggressiveProbability + 0.80f * aggressiveProbability * aggressiveProbability,
+                POSTFLOP_EPS, 1.0f - POSTFLOP_EPS);
+        }
+
         float NormalizeTarget(float value)
         {
             if (!_finite(value))
@@ -899,10 +910,15 @@ namespace G5Cpp
             for (int i = 0; i < _length; i++)
                 newRange->_likelihood[i] *= (1.0f - betProb[i]);
         }
-        else if (actionType == Action_Bet || actionType == Action_AllIn)
+        else if (actionType == Action_Bet)
         {
             for (int i = 0; i < _length; i++)
                 newRange->_likelihood[i] *= betProb[i];
+        }
+        else if (actionType == Action_AllIn)
+        {
+            for (int i = 0; i < _length; i++)
+                newRange->_likelihood[i] *= AllInLikelihoodFromAggression(betProb[i]);
         }
         else
         {
@@ -963,10 +979,15 @@ namespace G5Cpp
             for (int i = 0; i < _length; i++)
                 newRange->_likelihood[i] *= callProb[i];
         }
-        else if (actionType == Action_Raise || actionType == Action_AllIn)
+        else if (actionType == Action_Raise)
         {
             for (int i = 0; i < _length; i++)
                 newRange->_likelihood[i] *= raiseProb[i];
+        }
+        else if (actionType == Action_AllIn)
+        {
+            for (int i = 0; i < _length; i++)
+                newRange->_likelihood[i] *= AllInLikelihoodFromAggression(raiseProb[i]);
         }
         else
         {

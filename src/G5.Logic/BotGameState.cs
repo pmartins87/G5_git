@@ -39,6 +39,31 @@ namespace G5.Logic
 
         private int _preFlopChartsLevel;
 
+        public struct ActionSizingContext
+        {
+            public ActionType ActionType;
+            public int ActionAmount;
+            public int AmountToCall;
+            public int PotBeforeAction;
+            public int StackBeforeAction;
+            public int MoneyInPotBeforeAction;
+            public int MaxMoneyInPotBeforeAction;
+            public int BigBlindSize;
+            public bool IsAllIn;
+            public float BetToPotRatio;
+            public float CallToPotRatio;
+            public float StackCommitment;
+            public float SprBeforeAction;
+
+            public override string ToString()
+            {
+                return $"action={ActionType}, amount={ActionAmount}, amountToCall={AmountToCall}, pot={PotBeforeAction}, stack={StackBeforeAction}, " +
+                       $"allin={IsAllIn}, betPot={BetToPotRatio:F2}, callPot={CallToPotRatio:F2}, commit={StackCommitment:F2}, spr={SprBeforeAction:F2}";
+            }
+        }
+
+        private ActionSizingContext _lastActionSizingContext;
+
 // Options
 private bool _randomlySampleActions;
 
@@ -511,6 +536,58 @@ public string getPreFlopChartsInfo()
             return amountToCall;
         }
 
+        private static float SafeRatio(int numerator, int denominator)
+        {
+            if (denominator <= 0)
+                return 0.0f;
+
+            return numerator / (float)denominator;
+        }
+
+        private void captureActionSizingContext(ActionType actionType, int actionAmount, bool isAllIn)
+        {
+            if (_playerToActInd < 0 || _playerToActInd >= _players.Count)
+            {
+                _lastActionSizingContext = new ActionSizingContext
+                {
+                    ActionType = actionType,
+                    ActionAmount = actionAmount,
+                    BigBlindSize = _bigBlingSize,
+                    IsAllIn = isAllIn
+                };
+                return;
+            }
+
+            Player player = getPlayerToAct();
+            int potBeforeAction = potSize();
+            int amountToCall = getAmountToCall();
+            int stackBeforeAction = player.Stack;
+            int maxMoneyInPot = getMaxMoneyInThePot();
+            int effectiveActionAmount = Math.Max(0, Math.Min(actionAmount, stackBeforeAction));
+
+            _lastActionSizingContext = new ActionSizingContext
+            {
+                ActionType = actionType,
+                ActionAmount = effectiveActionAmount,
+                AmountToCall = amountToCall,
+                PotBeforeAction = potBeforeAction,
+                StackBeforeAction = stackBeforeAction,
+                MoneyInPotBeforeAction = player.MoneyInPot,
+                MaxMoneyInPotBeforeAction = maxMoneyInPot,
+                BigBlindSize = _bigBlingSize,
+                IsAllIn = isAllIn || effectiveActionAmount >= stackBeforeAction,
+                BetToPotRatio = SafeRatio(effectiveActionAmount, Math.Max(1, potBeforeAction + amountToCall)),
+                CallToPotRatio = SafeRatio(amountToCall, Math.Max(1, potBeforeAction + amountToCall)),
+                StackCommitment = SafeRatio(effectiveActionAmount, Math.Max(1, stackBeforeAction)),
+                SprBeforeAction = SafeRatio(stackBeforeAction, Math.Max(1, potBeforeAction))
+            };
+        }
+
+        public ActionSizingContext getLastActionSizingContext()
+        {
+            return _lastActionSizingContext;
+        }
+
         public Player getPlayerToAct()
         {
             return _players[_playerToActInd];
@@ -782,6 +859,15 @@ public string getPreFlopChartsInfo()
             {
                 return playerCheckCalls();
             }
+            else if (actionType == ActionType.AllIn)
+            {
+                int amountToCall = getAmountToCall();
+
+                if (amountToCall > 0 && (amountToCall >= getPlayerToAct().Stack || byAmount <= amountToCall))
+                    return playerCheckCalls();
+
+                return playerBetRaisesBy(getPlayerToAct().Stack);
+            }
             else
             {
                 return playerBetRaisesBy(byAmount);
@@ -795,10 +881,14 @@ public string getPreFlopChartsInfo()
 
             if (amountToCall >= getPlayerToAct().Stack)
             {
+                amountToCall = getPlayerToAct().Stack;
+
                 // Important that this is before player state changes (getPlayerToAct().GoesAllIn(...))
+                // This is an all-in call, not an all-in raise. Keep the range-cut branch as Call,
+                // while the sizing context records full stack commitment.
+                captureActionSizingContext(ActionType.Call, amountToCall, true);
                 _actionEstimator.newAction(ActionType.Call, this);
 
-                amountToCall = getPlayerToAct().Stack;
                 getPlayerToAct().GoesAllIn();
                 actionType = ActionType.AllIn;
                 _numCallers++;
@@ -806,6 +896,7 @@ public string getPreFlopChartsInfo()
             else if (amountToCall > 0) // Ima betova
             {
                 // Important that this is before player state changes (getPlayerToAct().Calls(...))
+                captureActionSizingContext(ActionType.Call, amountToCall, false);
                 _actionEstimator.newAction(ActionType.Call, this);
 
                 getPlayerToAct().Calls(amountToCall);
@@ -815,6 +906,7 @@ public string getPreFlopChartsInfo()
             else
             {
                 // Important that this is before player state changes (getPlayerToAct().Checks())
+                captureActionSizingContext(ActionType.Check, 0, false);
                 _actionEstimator.newAction(ActionType.Check, this);
 
                 getPlayerToAct().Checks();
@@ -844,18 +936,24 @@ public string getPreFlopChartsInfo()
             ActionType actionType = ActionType.Fold;
             var betOrRaise = (getAmountToCall() == 0) ? ActionType.Bet : ActionType.Raise;
 
+            if (amount <= 0)
+                amount = getRaiseAmount();
+
             if (amount >= getPlayerToAct().Stack)
             {
-                // Important that this is before player state changes (getPlayerToAct().GoesAllIn())
-                _actionEstimator.newAction(betOrRaise, this);
-
                 amount = getPlayerToAct().Stack;
+
+                // Important that this is before player state changes (getPlayerToAct().GoesAllIn())
+                captureActionSizingContext(ActionType.AllIn, amount, true);
+                _actionEstimator.newAction(ActionType.AllIn, this);
+
                 getPlayerToAct().GoesAllIn();
                 actionType = ActionType.AllIn;
             }
             else
             {
                 // Important that this is before player state changes (getPlayerToAct().BetsOrRaisesTo(...))
+                captureActionSizingContext(betOrRaise, amount, false);
                 _actionEstimator.newAction(betOrRaise, this);
 
                 getPlayerToAct().BetsOrRaisesTo(getPlayerToAct().MoneyInPot + amount);
@@ -880,6 +978,8 @@ public string getPreFlopChartsInfo()
         public void playerFolds()
         {
             //Console.WriteLine(getPlayerToAct().Name + " folds");
+            captureActionSizingContext(ActionType.Fold, 0, false);
+            _actionEstimator.newAction(ActionType.Fold, this);
             _currentHand.addAction(_street, getPlayerToAct().Name, ActionType.Fold, 0);
 
             getPlayerToAct().Folds();
@@ -889,7 +989,10 @@ public string getPreFlopChartsInfo()
         public void playerGoesAllIn()
         {
             //Console.WriteLine(getPlayerToAct().Name + " goes All-in");
-            _currentHand.addAction(_street, getPlayerToAct().Name, ActionType.AllIn, 0);
+            int amount = getPlayerToAct().Stack;
+            captureActionSizingContext(ActionType.AllIn, amount, true);
+            _actionEstimator.newAction(ActionType.AllIn, this);
+            _currentHand.addAction(_street, getPlayerToAct().Name, ActionType.AllIn, amount);
 
             getPlayerToAct().GoesAllIn();
             goToNextPlayer();
@@ -954,6 +1057,133 @@ public string getPreFlopChartsInfo()
             }
 
             return false;
+        }
+
+
+        private float calculateBoardWetnessForSizing()
+        {
+            if (_board == null || _board.Count < 3)
+                return 0.0f;
+
+            int[] rankCount = new int[15];
+            int[] suitCount = new int[4];
+            bool[] ranks = new bool[15];
+
+            foreach (var card in _board.Cards)
+            {
+                int r = (int)card.rank;
+                int s = (int)card.suit;
+
+                if (r >= 2 && r <= 14)
+                {
+                    rankCount[r]++;
+                    ranks[r] = true;
+
+                    if (r == 14)
+                        ranks[1] = true;
+                }
+
+                if (s >= 0 && s < 4)
+                    suitCount[s]++;
+            }
+
+            bool paired = rankCount.Any(x => x >= 2);
+            int maxSuit = suitCount.Max();
+            bool twoTone = maxSuit == 2;
+            bool monotone = maxSuit >= 3;
+
+            int bestStraightWindow = 0;
+            for (int high = 14; high >= 5; high--)
+            {
+                int count = 0;
+                for (int r = high - 4; r <= high; r++)
+                {
+                    if (ranks[r])
+                        count++;
+                }
+
+                if (count > bestStraightWindow)
+                    bestStraightWindow = count;
+            }
+
+            float wetness = 0.0f;
+
+            if (monotone)
+                wetness += 0.35f;
+            else if (twoTone)
+                wetness += 0.18f;
+
+            if (bestStraightWindow >= 3)
+                wetness += 0.25f;
+
+            if (paired)
+                wetness += 0.10f;
+
+            return Math.Max(0.0f, Math.Min(1.0f, wetness));
+        }
+
+        private int clampBetAmount(int amount)
+        {
+            int stack = _players[_heroInd].Stack;
+
+            if (amount < _bigBlingSize)
+                amount = _bigBlingSize;
+
+            if (amount > stack)
+                amount = stack;
+
+            return amount;
+        }
+
+        private int calculatePostFlopBetRaiseAmount(float checkCallEV, float betRaiseEV)
+        {
+            int amountToCall = getAmountToCall();
+            int pot = potSize();
+            int stack = _players[_heroInd].Stack;
+
+            if (stack <= 0)
+                return 0;
+
+            if (_street == Street.PreFlop)
+                return getRaiseAmount();
+
+            float edge = betRaiseEV - checkCallEV;
+            float wetness = calculateBoardWetnessForSizing();
+            HandStrength handStrength = HandStrength.calculateHandStrength(_heroHoleCards, _board);
+            bool hasStrongMadeHand = handStrength.rank >= HandRank.TwoPair;
+            bool hasWeakShowdown = handStrength.rank <= HandRank.HighCard;
+
+            int sizingBase = Math.Max(1, pot + amountToCall);
+            float fraction;
+
+            if (amountToCall == 0)
+            {
+                if (hasStrongMadeHand && wetness >= 0.35f)
+                    fraction = 0.75f;
+                else if (hasStrongMadeHand)
+                    fraction = 0.60f;
+                else if (hasWeakShowdown && edge > 0.0f)
+                    fraction = 0.33f;
+                else if (wetness >= 0.45f)
+                    fraction = 0.55f;
+                else
+                    fraction = 0.45f;
+            }
+            else
+            {
+                if (hasStrongMadeHand && wetness >= 0.35f)
+                    fraction = 0.95f;
+                else if (hasStrongMadeHand)
+                    fraction = 0.80f;
+                else if (edge > amountToCall)
+                    fraction = 0.75f;
+                else
+                    fraction = 0.60f;
+            }
+
+            int amount = amountToCall + (int)Math.Round(sizingBase * fraction);
+
+            return clampBetAmount(amount);
         }
 
 
@@ -1087,7 +1317,7 @@ if (_numBets == 0 && _numCallers > 0)
             }
             else // its raise
             {
-                bd.byAmount = getRaiseAmount();
+                bd.byAmount = calculatePostFlopBetRaiseAmount(bd.checkCallEV, bd.betRaiseEV);
             }
 
             if ((3 * bd.byAmount / 2) >= _players[_heroInd].Stack)

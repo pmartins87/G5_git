@@ -34,6 +34,113 @@ namespace G5.Logic.Estimators
             }
         }
 
+        private static float Clamp(float value, float min, float max)
+        {
+            if (float.IsNaN(value) || float.IsInfinity(value))
+                return min;
+
+            if (value < min)
+                return min;
+
+            if (value > max)
+                return max;
+
+            return value;
+        }
+
+        private static void NormalizeActionProbabilities(ref float betRaiseProb, ref float checkCallProb)
+        {
+            betRaiseProb = Clamp(betRaiseProb, 0.001f, 0.999f);
+            checkCallProb = Clamp(checkCallProb, 0.001f, 0.999f);
+
+            float sum = betRaiseProb + checkCallProb;
+
+            if (sum >= 0.997f)
+            {
+                float scale = 0.997f / sum;
+                betRaiseProb *= scale;
+                checkCallProb *= scale;
+            }
+        }
+
+        private static float SizeSelectivityMultiplier(BotGameState.ActionSizingContext ctx)
+        {
+            if (ctx.IsAllIn || ctx.ActionType == ActionType.AllIn)
+                return 0.32f;
+
+            float ratio = ctx.BetToPotRatio;
+
+            if (ratio <= 0.0f)
+                return 1.0f;
+
+            if (ratio < 0.25f)
+                return 1.35f;
+
+            if (ratio < 0.50f)
+                return 1.15f;
+
+            if (ratio < 0.85f)
+                return 1.00f;
+
+            if (ratio < 1.25f)
+                return 0.72f;
+
+            return 0.48f;
+        }
+
+        private static float CallSelectivityMultiplier(BotGameState.ActionSizingContext ctx)
+        {
+            if (ctx.IsAllIn || ctx.ActionType == ActionType.AllIn)
+                return 0.42f;
+
+            float ratio = ctx.CallToPotRatio;
+
+            if (ratio <= 0.0f)
+                return 1.0f;
+
+            if (ratio < 0.18f)
+                return 1.30f;
+
+            if (ratio < 0.32f)
+                return 1.10f;
+
+            if (ratio < 0.50f)
+                return 0.85f;
+
+            return 0.62f;
+        }
+
+        private static void ApplyObservedSizingToAD(ActionType observedAction, BotGameState gameState, ref float betRaiseProb, ref float checkCallProb)
+        {
+            var ctx = gameState.getLastActionSizingContext();
+
+            if (gameState.getStreet() == Street.PreFlop)
+            {
+                NormalizeActionProbabilities(ref betRaiseProb, ref checkCallProb);
+                return;
+            }
+
+            if (observedAction == ActionType.Bet || observedAction == ActionType.Raise || observedAction == ActionType.AllIn)
+            {
+                betRaiseProb *= SizeSelectivityMultiplier(ctx);
+
+                if (ctx.IsAllIn || observedAction == ActionType.AllIn)
+                    checkCallProb *= 0.72f;
+            }
+            else if (observedAction == ActionType.Call)
+            {
+                checkCallProb *= CallSelectivityMultiplier(ctx);
+            }
+            else if (observedAction == ActionType.Fold && ctx.AmountToCall > 0)
+            {
+                float pressure = Clamp(ctx.CallToPotRatio, 0.0f, 1.0f);
+                checkCallProb *= (1.0f - 0.45f * pressure);
+                betRaiseProb *= (1.0f - 0.35f * pressure);
+            }
+
+            NormalizeActionProbabilities(ref betRaiseProb, ref checkCallProb);
+        }
+
         private EstimatedAD getPlayerToActAD(Player playerToAct, BotGameState gameState)
         {
             if (gameState.getStreet() == Street.PreFlop)
@@ -98,8 +205,19 @@ namespace G5.Logic.Estimators
             float betRaiseProb = 0.0f;
             float checkCallProb = 0.0f;
             getPlayerToActAD(ref betRaiseProb, ref checkCallProb, gameState);
+            ApplyObservedSizingToAD(actionType, gameState, ref betRaiseProb, ref checkCallProb);
 
-            gameState.getPlayerToAct().CutRange(actionType,
+            var sizingContext = gameState.getLastActionSizingContext();
+            ActionType cutActionType = actionType;
+
+            // Open-shove is semantically a bet with maximum commitment, not a response
+            // to a previous bet. The sizing adjustment above already makes it much more
+            // selective than a normal bet; routing it through Check/Bet preserves the
+            // correct no-forced-action branch in Range.
+            if (actionType == ActionType.AllIn && sizingContext.AmountToCall == 0)
+                cutActionType = ActionType.Bet;
+
+            gameState.getPlayerToAct().CutRange(cutActionType,
                 gameState.getStreet(),
                 gameState.getBoard(),
                 betRaiseProb,
