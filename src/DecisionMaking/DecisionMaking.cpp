@@ -49,6 +49,7 @@
 static const char* DM_LOG_PATH = "C:\\G5Pressure\\DecisionMaking_debug.log";
 static const char* DM_DIAGNOSTIC_FLAG_PATH = "C:\\G5Pressure\\DecisionMaking.diagnostic";
 static const DWORD DM_FATAL_EXCEPTION_CODE = 0xE0000001;
+static const char* DM_BUILD_ID = "phase8_1_syncfix_mc2000_tc1000_cutoff0005";
 
 static bool DMIsDiagnosticEnabled()
 {
@@ -266,12 +267,12 @@ namespace G5Cpp
         const int MAX_PLAYERS = 6;
 
         const int SHOWDOWN_BIN_COUNT = 13260;
-        const int SHOWDOWN_ITERATIONS = 10000;
+        const int SHOWDOWN_ITERATIONS = 2000;
 
         const int TCUTOFF_BIN_COUNT = 13260;
-        const int TCUTOFF_ITERATIONS = 10000;
+        const int TCUTOFF_ITERATIONS = 1000;
 
-        const float NODE_CHANCE_CUTOFF = 0.0f; // 0.01f;
+        const float NODE_CHANCE_CUTOFF = 0.0005f;
 
         // Phase 6A: optional root-only forced bet/raise amount.
         // Used only by EstimateEVForBetRaiseAmount to evaluate candidate sizings.
@@ -1549,8 +1550,10 @@ namespace G5Cpp
     extern "C" G5_EXPORT void __stdcall EstimateEV(float& checkCallEV, float& betRaiseEV, int buttonInd, int heroIndex, const HoleCards& heroHoleCards,
         const PlayerDTO* players, int nPlayers, const Card* cardsInBoard, Street street, int numBets, int numCallers, int bigBlindSize, const void* gc)
     {
-        DMLog("===== ENTER EstimateEV =====");
-        DMResetDiagnosticCounters();
+DMLog("===== ENTER EstimateEV =====");
+DMLogF("[DM][BUILD] %s | SHOWDOWN_ITERATIONS=%d | TCUTOFF_ITERATIONS=%d | NODE_CHANCE_CUTOFF=%.6f",
+    DM_BUILD_ID, SHOWDOWN_ITERATIONS, TCUTOFF_ITERATIONS, NODE_CHANCE_CUTOFF);
+DMResetDiagnosticCounters();
 
         DMLogFmt(
             "EstimateEV parametros recebidos",

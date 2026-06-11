@@ -15,7 +15,7 @@ namespace G5.Logic
     {
         private const int RAISE_SIZE_NOM = 2;
         private const int RAISE_SIZE_DEN = 3;
-        private const int ALL_IN_COMMITMENT_PERCENT = 80;
+        private const int ALL_IN_COMMITMENT_PERCENT = 66;
 
         private int _bigBlingSize;
         private PokerClient _pokerClient;
@@ -315,7 +315,7 @@ public string getPreFlopChartsInfo()
                 ind = (ind + 1) % _players.Count;
             }
 
-            for (int i = 0; i <= _players.Count; i++)
+            for (int i = 0; i < _players.Count; i++)
             {
                 if (_players[i].PreFlopPosition == playerToActPosition)
                     return i;
@@ -1254,37 +1254,37 @@ public string getPreFlopChartsInfo()
                     candidates.Add(amount);
             };
 
-            addCandidate(getRaiseAmount());
-
-            float[] fractions = (amountToCall == 0)
-                ? new float[] { 0.33f, 0.50f, 0.66f, 0.75f, 1.00f }
-                : new float[] { 0.50f, 0.75f, 1.00f, 1.25f, 1.50f };
-
-            foreach (float fraction in fractions)
+            if (amountToCall > 0)
             {
-                int amount = amountToCall + (int)Math.Round(basePot * fraction);
-                addCandidate(amount);
-            }
-
-            float spr = stack / (float)Math.Max(1, pot);
-            if (spr <= 2.0f || stack <= (int)Math.Round(basePot * 1.50f))
+                // Facing a bet: testar apenas raise 50% do pote ajustado ou all-in.
+                addCandidate(amountToCall + (int)Math.Round(basePot * 0.50f));
                 addCandidate(stack);
+            }
+            else
+            {
+                float[] fractions;
+
+                if (_street == Street.Flop)
+                {
+                    // Sem aposta no flop: bet 33%, bet 50% ou all-in.
+                    fractions = new float[] { 0.33f, 0.50f };
+                }
+                else
+                {
+                    // Sem aposta no turn/river: bet 33%, 50%, 75%, 100% ou all-in.
+                    fractions = new float[] { 0.33f, 0.50f, 0.75f, 1.00f };
+                }
+
+                foreach (float fraction in fractions)
+                {
+                    int amount = (int)Math.Round(basePot * fraction);
+                    addCandidate(amount);
+                }
+
+                addCandidate(stack);
+            }
 
             candidates.Sort();
-
-            // Mantem a arvore sob controle. Evita multiplicar demais o tempo de decisao.
-            if (candidates.Count > 5)
-            {
-                List<int> reduced = new List<int>();
-                reduced.Add(candidates[0]);
-                reduced.Add(candidates[candidates.Count / 4]);
-                reduced.Add(candidates[candidates.Count / 2]);
-                reduced.Add(candidates[(3 * candidates.Count) / 4]);
-                reduced.Add(candidates[candidates.Count - 1]);
-
-                candidates = reduced.Distinct().OrderBy(x => x).ToList();
-            }
-
             return candidates;
         }
 
@@ -1426,49 +1426,40 @@ public string getPreFlopChartsInfo()
             return $"{flushTexture}, {pairTexture}, {straightTexture}, wetness={wetness:F2}";
         }
 
-        private string describeOpponentRangesForDiagnostics()
-        {
-            StringBuilder sb = new StringBuilder();
+public string getOpponentRangesDiagnostics(bool includeFolded = false, int topN = 5)
+{
+    StringBuilder sb = new StringBuilder();
 
-            for (int i = 0; i < _players.Count; i++)
-            {
-                if (i == _heroInd)
-                    continue;
+    for (int i = 0; i < _players.Count; i++)
+    {
+        if (i == _heroInd)
+            continue;
 
-                var player = _players[i];
+        var player = _players[i];
 
-                if (player.StatusInHand == Status.Folded)
-                    continue;
+        if (!includeFolded && player.StatusInHand == Status.Folded)
+            continue;
 
-                int activeCombos = 0;
-                float mass = 0.0f;
+        if (sb.Length > 0)
+            sb.Append(" | ");
 
-                foreach (var pair in player.Range.Data)
-                {
-                    if (pair.Equity > 0.0000001f)
-                    {
-                        activeCombos++;
-                        mass += pair.Equity;
-                    }
-                }
+        sb.Append($"{player.Name}/{player.PreFlopPosition}: ");
+        sb.Append($"status={player.StatusInHand}, ");
+        sb.Append($"stack={fmtPts(player.Stack)}, ");
+        sb.Append($"inPot={fmtPts(player.MoneyInPot)}, ");
+        sb.Append(player.Range.DiagnosticSummary(topN));
+    }
 
-                var topCombos = player.Range.Data
-                    .Where(x => x.Equity > 0.0000001f)
-                    .OrderByDescending(x => x.Equity)
-                    .Take(5)
-                    .Select(x => x.GetHoleCards().ToString() + ":" + (x.Equity * 100.0f).ToString("F2") + "%");
+    if (sb.Length == 0)
+        return "sem viloes ativos";
 
-                if (sb.Length > 0)
-                    sb.Append(" | ");
+    return sb.ToString();
+}
 
-                sb.Append($"{player.Name}/{player.PreFlopPosition}: status={player.StatusInHand}, stack={fmtPts(player.Stack)}, inPot={fmtPts(player.MoneyInPot)}, combos={activeCombos}, mass={mass:F4}, top=[{string.Join(", ", topCombos)}]");
-            }
-
-            if (sb.Length == 0)
-                return "sem viloes ativos";
-
-            return sb.ToString();
-        }
+private string describeOpponentRangesForDiagnostics()
+{
+    return getOpponentRangesDiagnostics(false, 5);
+}
 
         private void appendAcademicDecisionDiagnostics(ref BotDecision bd, int amountToCallAtDecisionStart, int nOfOpponents)
         {
@@ -1498,11 +1489,10 @@ public string getPreFlopChartsInfo()
             diag.AppendLine($"EV liquido: check/call={bd.checkCallEV:F3}, bet/raise={bd.betRaiseEV:F3}, edgeBR-CC={edge:F3}");
             diag.AppendLine($"acaoEscolhida={bd.actionType}, byAmount={fmtPts(bd.byAmount)}, commitmentEscolhido={selectedCommitment:P1}, multiSizeEV={bd.usedMultiSizeEV}");
 
-            if (_street > Street.PreFlop)
-            {
-                diag.AppendLine($"texturaBoard={describeBoardTextureForDiagnostics()}");
-                diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
-            }
+if (_street > Street.PreFlop)
+    diag.AppendLine($"texturaBoard={describeBoardTextureForDiagnostics()}");
+
+diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
 
             if (!string.IsNullOrWhiteSpace(bd.sizingReport))
             {

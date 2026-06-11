@@ -28,7 +28,8 @@ namespace G5Bridge
         private static int _numPlayers = 0;
         public static int _buttonIndex = 0;
         private static bool _wasHeadsUp = false;
-        private static bool _streetSyncFailed = false;
+private static bool _streetSyncFailed = false;
+private static bool _handSyncFailed = false;
 
         private static Dictionary<int, int> ChairVersions = new Dictionary<int, int>();
 
@@ -262,9 +263,10 @@ namespace G5Bridge
             [MarshalAs(UnmanagedType.LPStr)] string basePath,
             [MarshalAs(UnmanagedType.LPStr)] string tableTitle)
         {
-            HeroDeuFold = false;
-            _streetSyncFailed = false;
-            HeroLogicalIndex = heroIndex;
+HeroDeuFold = false;
+_streetSyncFailed = false;
+_handSyncFailed = false;
+HeroLogicalIndex = heroIndex;
             CurrentChairs = (int[])chairs.Clone();
             CurrentBigBlind = bigBlind;
 
@@ -365,33 +367,75 @@ namespace G5Bridge
         {
             Log($"[DealHoleCards] {c0} {c1}");
             if (_gameState == null) return;
-            try { _gameState.dealHoleCards(new Card(c0), new Card(c1)); Log("[DealHoleCards] OK."); }
-            catch (Exception ex) { Log($"[DealHoleCards] ERRO: {ex.Message}"); }
+try
+{
+    _gameState.dealHoleCards(new Card(c0), new Card(c1));
+    Log("[DealHoleCards] OK.");
+    Log($"[Ranges] apos DealHoleCards: {_gameState.getOpponentRangesDiagnostics(false, 5)}");
+}
+catch (Exception ex) { Log($"[DealHoleCards] ERRO: {ex.Message}"); }
         }
 
-        private static void InternalNewAction(int playerLogIdx, int actionType, int byAmount, string src)
+private static void InternalNewAction(int playerLogIdx, int actionType, int byAmount, string src)
+{
+    if (src != "XML Inject")
+        Log($"[{src}] Posicao={GetPositionName(playerLogIdx, _buttonIndex, _numPlayers)}");
+
+    if (_gameState == null) return;
+
+    if (_handSyncFailed || _streetSyncFailed)
+    {
+        Log($"[{src}] Ignorado: mao bloqueada por falha de sincronia. " +
+            $"handSyncFailed={_handSyncFailed}, streetSyncFailed={_streetSyncFailed}.");
+        return;
+    }
+
+    try
+    {
+        int max = _gameState.getPlayers().Count, att = 0;
+
+        while (_gameState.getPlayerToActInd() != playerLogIdx
+               && _gameState.getPlayerToActInd() >= 0 && att < max)
         {
-            if (src != "XML Inject")
-                Log($"[{src}] Posicao={GetPositionName(playerLogIdx, _buttonIndex, _numPlayers)}");
-            if (_gameState == null) return;
-            try
+            int cur = _gameState.getPlayerToActInd();
+
+            if (cur == HeroLogicalIndex || cur == _gameState.getHeroInd())
             {
-                int max = _gameState.getPlayers().Count, att = 0;
-                while (_gameState.getPlayerToActInd() != playerLogIdx
-                       && _gameState.getPlayerToActInd() >= 0 && att < max)
-                {
-                    int cur = _gameState.getPlayerToActInd();
-                    Log($"[{src}] fold forcado em {GetPositionName(cur, _buttonIndex, _numPlayers)}");
-                    _gameState.playerFolds();
-                    att++;
-                }
-                if (_gameState.getPlayerToActInd() != playerLogIdx) return;
-                _gameState.playerActs((ActionType)actionType, byAmount);
-                Log($"[{src}] OK - {GetActionName(actionType)} by {byAmount}. " +
-                    $"Proximo={GetPositionName(_gameState.getPlayerToActInd(), _buttonIndex, _numPlayers)}");
+                _handSyncFailed = true;
+
+                Log($"[{src}] DESYNC GRAVE: tentativa de fold forcado no heroi. " +
+                    $"Esperado={GetPositionName(cur, _buttonIndex, _numPlayers)}({cur}), " +
+                    $"recebido={GetPositionName(playerLogIdx, _buttonIndex, _numPlayers)}({playerLogIdx}). " +
+                    $"Bloqueando a mao ate a proxima NewHand.");
+                return;
             }
-            catch (Exception ex) { Log($"[{src}] ERRO: {ex.Message}"); }
+
+            Log($"[{src}] fold forcado em {GetPositionName(cur, _buttonIndex, _numPlayers)}");
+            _gameState.playerFolds();
+            att++;
         }
+
+        if (_gameState.getPlayerToActInd() != playerLogIdx)
+        {
+            _handSyncFailed = true;
+            Log($"[{src}] DESYNC: apos tentativa de alinhamento, playerToAct=" +
+                $"{GetPositionName(_gameState.getPlayerToActInd(), _buttonIndex, _numPlayers)}({_gameState.getPlayerToActInd()}), " +
+                $"recebido={GetPositionName(playerLogIdx, _buttonIndex, _numPlayers)}({playerLogIdx}). " +
+                $"Bloqueando a mao.");
+            return;
+        }
+
+_gameState.playerActs((ActionType)actionType, byAmount);
+Log($"[{src}] OK - {GetActionName(actionType)} by {byAmount}. " +
+    $"Proximo={GetPositionName(_gameState.getPlayerToActInd(), _buttonIndex, _numPlayers)}");
+Log($"[Ranges] apos {src} {GetActionName(actionType)} by {byAmount}: {_gameState.getOpponentRangesDiagnostics(false, 5)}");
+    }
+    catch (Exception ex)
+    {
+        _handSyncFailed = true;
+        Log($"[{src}] ERRO: {ex.Message}. Bloqueando a mao ate a proxima NewHand.");
+    }
+}
 
         [DllExport("G5Bridge_NewAction", CallingConvention = CallingConvention.StdCall)]
         [MethodImpl(MethodImplOptions.Synchronized)]
@@ -452,11 +496,17 @@ namespace G5Bridge
 
             try
             {
-                if (_streetSyncFailed)
-                {
-                    Log($"[{src}] Street ignorada: sincronizacao desta mao ja falhou. Aguardando proxima mao.");
-                    return;
-                }
+if (_handSyncFailed)
+{
+    Log($"[{src}] Street ignorada: mao bloqueada por desync anterior. Aguardando proxima mao.");
+    return;
+}
+
+if (_streetSyncFailed)
+{
+    Log($"[{src}] Street ignorada: sincronizacao desta mao ja falhou. Aguardando proxima mao.");
+    return;
+}
 
                 Street currentStreet = _gameState.getStreet();
 
@@ -491,8 +541,9 @@ namespace G5Bridge
                         return;
                     }
 
-                    _gameState.goToNextStreet(new List<Card> { f0, f1, f2 });
-                    Log($"[{src}] Flop: {c0} {c1} {c2}");
+_gameState.goToNextStreet(new List<Card> { f0, f1, f2 });
+Log($"[{src}] Flop: {c0} {c1} {c2}");
+Log($"[Ranges] apos Flop: {_gameState.getOpponentRangesDiagnostics(false, 5)}");
                 }
                 else if (n == 1)
                 {
@@ -517,8 +568,9 @@ namespace G5Bridge
                         return;
                     }
 
-                    _gameState.goToNextStreet(card);
-                    Log($"[{src}] {_gameState.getStreet()}: {c0}");
+_gameState.goToNextStreet(card);
+Log($"[{src}] {_gameState.getStreet()}: {c0}");
+Log($"[Ranges] apos {_gameState.getStreet()}: {_gameState.getOpponentRangesDiagnostics(false, 5)}");
                 }
                 else
                 {
@@ -554,12 +606,20 @@ namespace G5Bridge
                 betRaiseEV = 0f
             };
 
-            if (_gameState == null)
-            {
-                Log("[GetDecision] ERRO: _gameState == null.");
-                Log("------------------------------------------------");
-                return result;
-            }
+if (_gameState == null)
+{
+    Log("[GetDecision] ERRO: _gameState == null.");
+    Log("------------------------------------------------");
+    return result;
+}
+
+if (_handSyncFailed || _streetSyncFailed)
+{
+    Log($"[GetDecision] Mao bloqueada por falha de sincronia. " +
+        $"handSyncFailed={_handSyncFailed}, streetSyncFailed={_streetSyncFailed}. Retornando actionType=-1.");
+    Log("------------------------------------------------");
+    return result;
+}
 
             try
             {
@@ -712,21 +772,29 @@ namespace G5Bridge
             Log($"[XML Inject] SHOWDOWN! Logico {logIdx}: {c1} {c2}");
         }
 
-        public static void Log(string message)
-        {
-            try
-            {
-                string folder = string.IsNullOrEmpty(_basePath)
-                    ? Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)
-                    : _basePath;
-                string logDir = Path.Combine(folder, "logs");
-                if (!Directory.Exists(logDir)) Directory.CreateDirectory(logDir);
-                lock (_logLock)
-                    File.AppendAllText(Path.Combine(logDir, "G5Bridge.log"),
-                        $"[{DateTime.Now:HH:mm:ss.fff}] {message}\n");
-            }
-            catch { }
-        }
+public static void Log(string message)
+{
+    try
+    {
+        string folder = string.IsNullOrEmpty(_basePath)
+            ? Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)
+            : _basePath;
+
+        string logDir = Path.Combine(folder, "logs");
+        if (!Directory.Exists(logDir)) Directory.CreateDirectory(logDir);
+
+        string tablePart = string.IsNullOrWhiteSpace(_targetTableId)
+            ? "sem_tabela"
+            : Regex.Replace(_targetTableId, @"[^\w\-]+", "_");
+
+        string logFile = $"G5Bridge_{tablePart}_pid{Process.GetCurrentProcess().Id}.log";
+
+        lock (_logLock)
+            File.AppendAllText(Path.Combine(logDir, logFile),
+                $"[{DateTime.Now:HH:mm:ss.fff}] {message}\n");
+    }
+    catch { }
+}
     }
 
     // =========================================================================

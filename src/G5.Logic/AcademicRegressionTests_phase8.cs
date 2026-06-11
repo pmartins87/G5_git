@@ -202,8 +202,8 @@ namespace G5.Logic.Tests
 
         private static void RunStateValidationTests(AcademicRegressionReport report)
         {
-            ExpectTrue(report, "threshold all-in 79% nao converte", !BotGameState.ShouldConvertToAllInByCommitmentForRegression(790, 1000), "790/1000 deve permanecer bet/raise comum");
-            ExpectTrue(report, "threshold all-in 80% converte", BotGameState.ShouldConvertToAllInByCommitmentForRegression(800, 1000), "800/1000 deve converter para all-in");
+            ExpectTrue(report, "threshold all-in 65% nao converte", !BotGameState.ShouldConvertToAllInByCommitmentForRegression(650, 1000), "650/1000 deve permanecer bet/raise comum");
+            ExpectTrue(report, "threshold all-in 66% converte", BotGameState.ShouldConvertToAllInByCommitmentForRegression(660, 1000), "660/1000 deve converter para all-in");
             ExpectTrue(report, "threshold all-in acima do stack converte", BotGameState.ShouldConvertToAllInByCommitmentForRegression(1200, 1000), "1200/1000 deve converter para all-in");
 
             ExpectThrows(report, "board rejeita carta duplicada", delegate
@@ -287,7 +287,7 @@ namespace G5.Logic.Tests
             noAction.DoNotAdvanceToHero = true;
             noAction.ExpectDiagnostic = false;
             s.Add(noAction);
-            s.Add(Post("All-in por commitment minimo 80", "AsAh", "Kd8c2s", 0, 0, A(ActionType.Check, 0), 1.0f, 30.0f, ExpectedDecisionKind.Aggressive, true));
+            s.Add(Post("All-in por commitment minimo 66", "AsAh", "Kd8c2s", 0, 0, A(ActionType.Check, 0), 1.0f, 30.0f, ExpectedDecisionKind.Aggressive, true));
             s.Add(Post("Check gratis quando ambos EV negativos sem bet", "7s2d", "AhKdQc", 0, 0, A(ActionType.Check, 0), -5.0f, -8.0f, ExpectedDecisionKind.CheckOrCall, false));
 
             return s;

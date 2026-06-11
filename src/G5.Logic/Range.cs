@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
+using System.Text;
 
 
 namespace G5.Logic
@@ -129,6 +131,89 @@ namespace G5.Logic
 
             return 0.0f;
         }
+		
+public int ActiveComboCount(float minEquity = 0.0000001f)
+{
+    int count = 0;
+
+    for (int i = 0; i < N_HOLECARDS; i++)
+    {
+        if (Data[i].Equity > minEquity)
+            count++;
+    }
+
+    return count;
+}
+
+public float ProbabilityMass(float minEquity = 0.0000001f)
+{
+    float mass = 0.0f;
+
+    for (int i = 0; i < N_HOLECARDS; i++)
+    {
+        if (Data[i].Equity > minEquity)
+            mass += Data[i].Equity;
+    }
+
+    return mass;
+}
+
+public string TopCombosSummary(int topN = 8, float minEquity = 0.0000001f)
+{
+    var top = Data
+        .Where(x => x.Equity > minEquity)
+        .OrderByDescending(x => x.Equity)
+        .Take(topN)
+        .Select(x => x.GetHoleCards().ToString() + ":" + (x.Equity * 100.0f).ToString("F2") + "%");
+
+    string result = string.Join(", ", top);
+
+    if (string.IsNullOrWhiteSpace(result))
+        return "-";
+
+    return result;
+}
+
+public string CuttingParamsSummary(int maxItems = 12)
+{
+    if (CuttingParams == null || CuttingParams.Count == 0)
+        return "sem cortes";
+
+    int start = Math.Max(0, CuttingParams.Count - maxItems);
+    StringBuilder sb = new StringBuilder();
+
+    for (int i = start; i < CuttingParams.Count; i++)
+    {
+        var c = CuttingParams[i];
+
+        if (sb.Length > 0)
+            sb.Append(" -> ");
+
+        sb.Append(c.Street);
+        sb.Append(":");
+        sb.Append(c.ActionType);
+        sb.Append("(br=");
+        sb.Append(c.Value1.ToString("F3"));
+
+        if (c.Forced)
+        {
+            sb.Append(",cc=");
+            sb.Append(c.Value2.ToString("F3"));
+        }
+
+        sb.Append(")");
+    }
+
+    if (CuttingParams.Count > maxItems)
+        return $"... {sb}";
+
+    return sb.ToString();
+}
+
+public string DiagnosticSummary(int topN = 8)
+{
+    return $"combos={ActiveComboCount()}, mass={ProbabilityMass():F4}, top=[{TopCombosSummary(topN)}], cortes=[{CuttingParamsSummary()}]";
+}
 
         public void BanCards(List<Card> cards, bool isBoard)
         {
