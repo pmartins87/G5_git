@@ -1329,6 +1329,177 @@ public string getPreFlopChartsInfo()
             return true;
         }
 
+        private static string fmtPts(int value)
+        {
+            return value.ToString();
+        }
+
+        private string describeBoardForDiagnostics()
+        {
+            if (_board == null || _board.Count == 0)
+                return "sem board";
+
+            return _board.ToString();
+        }
+
+        private string describeHeroHandForDiagnostics()
+        {
+            try
+            {
+                if (_street == Street.PreFlop)
+                    return _heroHoleCards.ToString();
+
+                var hs = HandStrength.calculateHandStrength(_heroHoleCards, _board);
+                return $"{_heroHoleCards} / {hs.rank}";
+            }
+            catch
+            {
+                return _heroHoleCards == null ? "?" : _heroHoleCards.ToString();
+            }
+        }
+
+        private string describeBoardTextureForDiagnostics()
+        {
+            if (_board == null || _board.Count < 3)
+                return "nao aplicavel";
+
+            int[] rankCount = new int[15];
+            int[] suitCount = new int[4];
+            bool[] ranks = new bool[15];
+
+            foreach (var card in _board.Cards)
+            {
+                int r = (int)card.rank;
+                int s = (int)card.suit;
+
+                if (r >= 2 && r <= 14)
+                {
+                    rankCount[r]++;
+                    ranks[r] = true;
+
+                    if (r == 14)
+                        ranks[1] = true;
+                }
+
+                if (s >= 0 && s < 4)
+                    suitCount[s]++;
+            }
+
+            bool paired = rankCount.Any(x => x >= 2);
+            int maxSuit = suitCount.Max();
+            bool twoTone = maxSuit == 2;
+            bool monotone = maxSuit >= 3;
+
+            int bestStraightWindow = 0;
+            for (int high = 14; high >= 5; high--)
+            {
+                int count = 0;
+                for (int r = high - 4; r <= high; r++)
+                {
+                    if (ranks[r])
+                        count++;
+                }
+
+                if (count > bestStraightWindow)
+                    bestStraightWindow = count;
+            }
+
+            float wetness = calculateBoardWetnessForSizing();
+            string flushTexture = monotone ? "monotone" : (twoTone ? "two-tone" : "rainbow/seco de naipe");
+            string pairTexture = paired ? "pareado" : "nao pareado";
+            string straightTexture = bestStraightWindow >= 4 ? "muito conectado" : (bestStraightWindow >= 3 ? "conectado" : "pouco conectado");
+
+            return $"{flushTexture}, {pairTexture}, {straightTexture}, wetness={wetness:F2}";
+        }
+
+        private string describeOpponentRangesForDiagnostics()
+        {
+            StringBuilder sb = new StringBuilder();
+
+            for (int i = 0; i < _players.Count; i++)
+            {
+                if (i == _heroInd)
+                    continue;
+
+                var player = _players[i];
+
+                if (player.StatusInHand == Status.Folded)
+                    continue;
+
+                int activeCombos = 0;
+                float mass = 0.0f;
+
+                foreach (var pair in player.Range.Data)
+                {
+                    if (pair.Equity > 0.0000001f)
+                    {
+                        activeCombos++;
+                        mass += pair.Equity;
+                    }
+                }
+
+                var topCombos = player.Range.Data
+                    .Where(x => x.Equity > 0.0000001f)
+                    .OrderByDescending(x => x.Equity)
+                    .Take(5)
+                    .Select(x => x.GetHoleCards().ToString() + ":" + (x.Equity * 100.0f).ToString("F2") + "%");
+
+                if (sb.Length > 0)
+                    sb.Append(" | ");
+
+                sb.Append($"{player.Name}/{player.PreFlopPosition}: status={player.StatusInHand}, stack={fmtPts(player.Stack)}, inPot={fmtPts(player.MoneyInPot)}, combos={activeCombos}, mass={mass:F4}, top=[{string.Join(", ", topCombos)}]");
+            }
+
+            if (sb.Length == 0)
+                return "sem viloes ativos";
+
+            return sb.ToString();
+        }
+
+        private void appendAcademicDecisionDiagnostics(ref BotDecision bd, int amountToCallAtDecisionStart, int nOfOpponents)
+        {
+            int pot = potSize();
+            int heroStack = getHero().Stack;
+            int heroInPot = getHero().MoneyInPot;
+            int maxInPot = getMaxMoneyInThePot();
+            int activePlayers = numActivePlayers();
+            int activeNonAllIn = numActiveNonAllInPlayers();
+
+            float spr = heroStack / (float)Math.Max(1, pot);
+            float potOdds = 0.0f;
+
+            if (amountToCallAtDecisionStart > 0)
+                potOdds = amountToCallAtDecisionStart / (float)Math.Max(1, pot + amountToCallAtDecisionStart);
+
+            float edge = bd.betRaiseEV - bd.checkCallEV;
+            float selectedInvestment = bd.byAmount;
+            float selectedCommitment = heroStack > 0 ? selectedInvestment / Math.Max(1.0f, heroStack) : 0.0f;
+
+            StringBuilder diag = new StringBuilder();
+            diag.AppendLine();
+            diag.AppendLine("[Diagnostico academico da decisao]");
+            diag.AppendLine($"street={_street}, board={describeBoardForDiagnostics()}, hero={describeHeroHandForDiagnostics()}");
+            diag.AppendLine($"jogadores: ativos={activePlayers}, oponentes={nOfOpponents}, nonAllIn={activeNonAllIn}, heroPos={getHero().PreFlopPosition}, heroInPosition={isPlayerInPosition(_heroInd)}");
+            diag.AppendLine($"pote={fmtPts(pot)}, maxInPot={fmtPts(maxInPot)}, heroInPot={fmtPts(heroInPot)}, stackHero={fmtPts(heroStack)}, amountToCall={fmtPts(amountToCallAtDecisionStart)}, SPR={spr:F2}, potOddsCall={potOdds:P1}");
+            diag.AppendLine($"EV liquido: check/call={bd.checkCallEV:F3}, bet/raise={bd.betRaiseEV:F3}, edgeBR-CC={edge:F3}");
+            diag.AppendLine($"acaoEscolhida={bd.actionType}, byAmount={fmtPts(bd.byAmount)}, commitmentEscolhido={selectedCommitment:P1}, multiSizeEV={bd.usedMultiSizeEV}");
+
+            if (_street > Street.PreFlop)
+            {
+                diag.AppendLine($"texturaBoard={describeBoardTextureForDiagnostics()}");
+                diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(bd.sizingReport))
+            {
+                diag.AppendLine("resumoSizingEV:");
+                diag.Append(bd.sizingReport.TrimEnd());
+                diag.AppendLine();
+            }
+
+            bd.message += diag.ToString();
+        }
+
         public BotDecision calculateHeroAction()
         {
             int nOfOpponents = numActivePlayers() - 1;
@@ -1479,6 +1650,8 @@ if (_numBets == 0 && _numCallers > 0)
                 bd.byAmount = _players[_heroInd].Stack;
                 bd.actionType = ActionType.AllIn;
             }
+
+            appendAcademicDecisionDiagnostics(ref bd, amountToCall, nOfOpponents);
 
             // Remove all leading and traiing white-space characters 
             bd.message = bd.message.Trim();
