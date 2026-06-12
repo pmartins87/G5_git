@@ -170,6 +170,594 @@ private static bool _handSyncFailed = false;
             public float checkCallEV;
             public float betRaiseEV;
         }
+		
+        private const int PRW_HAND_COUNT = 1326;
+        private const int PRW_MAX_CHAIRS = 10;
+        private const int PRW_WEIGHT_SCALE = 1000000;
+
+        private static int PRW_USEME_OFFSET = 0;
+        private static int PRW_PREFLOP_OFFSET = 4;
+        private static int PRW_USECALLBACK_OFFSET = 8;
+
+        private static int PRW_CHAIR_ARRAY_OFFSET = 0;
+        private static int PRW_CHAIR_SIZE = 0;
+        private static int PRW_CHAIR_LEVEL_OFFSET = 0;
+        private static int PRW_CHAIR_LIMIT_OFFSET = 4;
+        private static int PRW_CHAIR_IGNORE_OFFSET = 8;
+        private static int PRW_CHAIR_RANKHI_OFFSET = 12;
+        private static int PRW_CHAIR_RANKLO_OFFSET = 0;
+        private static int PRW_CHAIR_WEIGHT_OFFSET = 0;
+
+        private static bool _loggedEnhancedPrWinLayout = false;
+
+        private static bool ConfigurePrwLayout(
+            int rootUseMeOffset,
+            int rootPreflopOffset,
+            int rootUseCallbackOffset,
+            int chairArrayOffset,
+            int chairSize,
+            int chairLevelOffset,
+            int chairLimitOffset,
+            int chairIgnoreOffset,
+            int chairRankHiOffset,
+            int chairRankLoOffset,
+            int chairWeightOffset)
+        {
+            if (rootUseMeOffset < 0 ||
+                rootPreflopOffset < 0 ||
+                rootUseCallbackOffset < 0 ||
+                chairArrayOffset <= 0 ||
+                chairSize <= 0 ||
+                chairLevelOffset < 0 ||
+                chairLimitOffset < 0 ||
+                chairIgnoreOffset < 0 ||
+                chairRankHiOffset < 0 ||
+                chairRankLoOffset <= chairRankHiOffset ||
+                chairWeightOffset <= chairRankLoOffset)
+            {
+                Log("[EnhancedPrWin Layout] ERRO: offsets invalidos recebidos da user.dll.");
+                return false;
+            }
+
+            if (chairRankHiOffset + (PRW_HAND_COUNT * 4) > chairSize ||
+                chairRankLoOffset + (PRW_HAND_COUNT * 4) > chairSize ||
+                chairWeightOffset + (PRW_HAND_COUNT * 4) > chairSize)
+            {
+                Log("[EnhancedPrWin Layout] ERRO: arrays rankhi/ranklo/weight excedem o tamanho da cadeira prw1326.");
+                return false;
+            }
+
+            PRW_USEME_OFFSET = rootUseMeOffset;
+            PRW_PREFLOP_OFFSET = rootPreflopOffset;
+            PRW_USECALLBACK_OFFSET = rootUseCallbackOffset;
+
+            PRW_CHAIR_ARRAY_OFFSET = chairArrayOffset;
+            PRW_CHAIR_SIZE = chairSize;
+            PRW_CHAIR_LEVEL_OFFSET = chairLevelOffset;
+            PRW_CHAIR_LIMIT_OFFSET = chairLimitOffset;
+            PRW_CHAIR_IGNORE_OFFSET = chairIgnoreOffset;
+            PRW_CHAIR_RANKHI_OFFSET = chairRankHiOffset;
+            PRW_CHAIR_RANKLO_OFFSET = chairRankLoOffset;
+            PRW_CHAIR_WEIGHT_OFFSET = chairWeightOffset;
+
+            if (!_loggedEnhancedPrWinLayout)
+            {
+                _loggedEnhancedPrWinLayout = true;
+
+                Log($"[EnhancedPrWin Layout] root(useme={PRW_USEME_OFFSET}, preflop={PRW_PREFLOP_OFFSET}, usecallback={PRW_USECALLBACK_OFFSET}, chairArray={PRW_CHAIR_ARRAY_OFFSET}); " +
+                    $"chair(size={PRW_CHAIR_SIZE}, level={PRW_CHAIR_LEVEL_OFFSET}, limit={PRW_CHAIR_LIMIT_OFFSET}, ignore={PRW_CHAIR_IGNORE_OFFSET}, " +
+                    $"rankhi={PRW_CHAIR_RANKHI_OFFSET}, ranklo={PRW_CHAIR_RANKLO_OFFSET}, weight={PRW_CHAIR_WEIGHT_OFFSET}).");
+            }
+
+            return true;
+        }
+
+        private struct OHEquitySnapshot
+        {
+            public bool IsValid;
+            public bool IsEnhancedProfile;
+            public DateTime ReceivedAt;
+            public int OhStreet;
+            public double PrWin;
+            public double PrTie;
+            public double PrLos;
+            public double PrWinNow;
+            public double PrLosNow;
+            public double NHands;
+            public double NHandsHi;
+            public double NHandsLo;
+            public double NHandsTi;
+        }
+
+        private static OHEquitySnapshot _lastOHEquitySnapshot;
+        private static int _lastEnhancedPrWinStreet = 0;
+
+        private const double OH_SNAPSHOT_MAX_AGE_SECONDS = 3.0;
+        private const double OH_MIN_NHANDS_FOR_DECISION = 100.0;
+        private const double OH_EQUITY_EPSILON = 0.000001;
+
+        private static int PrwChairOffset(int physicalChair)
+        {
+            return PRW_CHAIR_ARRAY_OFFSET + (physicalChair * PRW_CHAIR_SIZE);
+        }
+
+        private static double SafeDouble(double value)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                return 0.0;
+
+            return value;
+        }
+		
+        private static double ClampDouble(double value, double min, double max)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                return min;
+
+            if (value < min)
+                return min;
+
+            if (value > max)
+                return max;
+
+            return value;
+        }
+
+        private static int G5StreetToOHStreet(Street street)
+        {
+            switch (street)
+            {
+                case Street.PreFlop: return 1;
+                case Street.Flop: return 2;
+                case Street.Turn: return 3;
+                case Street.River: return 4;
+                default: return 0;
+            }
+        }
+
+        private static bool TryGetFreshOHEquity(out double equity, out string reason)
+        {
+            equity = 0.0;
+            reason = "";
+
+            if (_gameState == null)
+            {
+                reason = "_gameState == null";
+                return false;
+            }
+
+            if (_gameState.getStreet() == Street.PreFlop)
+            {
+                reason = "preflop";
+                return false;
+            }
+
+            if (!_lastOHEquitySnapshot.IsValid)
+            {
+                reason = "snapshot OH ainda nao recebido";
+                return false;
+            }
+
+            if (!_lastOHEquitySnapshot.IsEnhancedProfile)
+            {
+                reason = "snapshot OH nao veio de perfil EnhancedPrWin atualizado";
+                return false;
+            }
+
+            int currentOhStreet = G5StreetToOHStreet(_gameState.getStreet());
+
+            if (_lastOHEquitySnapshot.OhStreet != currentOhStreet)
+            {
+                reason = $"snapshot OH de outra street: snapshot={_lastOHEquitySnapshot.OhStreet}, atual={currentOhStreet}";
+                return false;
+            }
+
+            double ageSeconds = (DateTime.Now - _lastOHEquitySnapshot.ReceivedAt).TotalSeconds;
+
+            if (ageSeconds > OH_SNAPSHOT_MAX_AGE_SECONDS)
+            {
+                reason = $"snapshot OH antigo: {ageSeconds:F2}s";
+                return false;
+            }
+
+            if (_lastOHEquitySnapshot.NHands < OH_MIN_NHANDS_FOR_DECISION)
+            {
+                reason = $"nhands insuficiente: {_lastOHEquitySnapshot.NHands:F0}";
+                return false;
+            }
+
+            double prWin = SafeDouble(_lastOHEquitySnapshot.PrWin);
+            double prTie = SafeDouble(_lastOHEquitySnapshot.PrTie);
+            double prLos = SafeDouble(_lastOHEquitySnapshot.PrLos);
+
+            // OpenHoldem normalmente entrega probabilidades em 0..1.
+            // Este bloco protege contra ambientes/configuracoes que entreguem 0..100.
+            double sum = prWin + prTie + prLos;
+
+            if (sum > 1.5)
+            {
+                prWin /= 100.0;
+                prTie /= 100.0;
+                prLos /= 100.0;
+                sum = prWin + prTie + prLos;
+            }
+
+            if (sum <= OH_EQUITY_EPSILON)
+            {
+                reason = "snapshot OH com soma de probabilidades zerada";
+                return false;
+            }
+
+            equity = ClampDouble(prWin + (0.5 * prTie), 0.0, 1.0);
+            return true;
+        }
+
+        private static bool ApplyOHEquityCallFloor(ref DecisionResult result)
+        {
+            if (_gameState == null)
+                return false;
+
+            if (_gameState.getStreet() == Street.PreFlop)
+                return false;
+
+            int amountToCall = _gameState.getAmountToCall();
+
+            if (amountToCall <= 0)
+                return false;
+
+            if (result.actionType != (int)ActionType.Fold)
+                return false;
+
+            double equity;
+            string reason;
+
+            if (!TryGetFreshOHEquity(out equity, out reason))
+            {
+                DLog($"[OH Equity Floor] nao aplicado: {reason}.");
+                return false;
+            }
+
+            int potBeforeCall = _gameState.potSize();
+            double potAfterCall = Math.Max(1.0, potBeforeCall + amountToCall);
+            double requiredEquity = amountToCall / potAfterCall;
+            double ohCallEV = (equity * potAfterCall) - amountToCall;
+
+            DLog($"[OH Equity Floor] equity={equity:P2}, required={requiredEquity:P2}, pot={potBeforeCall}, call={amountToCall}, ohCallEV={ohCallEV:F3}, acaoOriginal={GetActionName(result.actionType)}.");
+
+            if (ohCallEV <= 0.0)
+                return false;
+
+            result.actionType = (int)ActionType.Call;
+            result.byAmount = amountToCall;
+
+            if (result.checkCallEV < (float)ohCallEV)
+                result.checkCallEV = (float)ohCallEV;
+
+            Log($"[OH Equity Floor] Fold convertido em Call: equityOH={equity:P2}, equityNecessaria={requiredEquity:P2}, callEV_OH={ohCallEV:F3}, call={amountToCall}.");
+            return true;
+        }
+
+        private static int RankCharToOHIndex(char c)
+        {
+            c = char.ToUpperInvariant(c);
+
+            if (c >= '2' && c <= '9')
+                return c - '2';
+
+            switch (c)
+            {
+                case 'T': return 8;
+                case 'J': return 9;
+                case 'Q': return 10;
+                case 'K': return 11;
+                case 'A': return 12;
+                default: return -1;
+            }
+        }
+
+        private static int SuitCharToOHOffset(char c)
+        {
+            c = char.ToLowerInvariant(c);
+
+            switch (c)
+            {
+                case 'h': return 0;
+                case 'd': return 13;
+                case 'c': return 26;
+                case 's': return 39;
+                default: return -1;
+            }
+        }
+
+        private static bool TryParseCardToOHValue(char rankChar, char suitChar, out int cardValue)
+        {
+            cardValue = -1;
+
+            int rank = RankCharToOHIndex(rankChar);
+            int suitOffset = SuitCharToOHOffset(suitChar);
+
+            if (rank < 0 || suitOffset < 0)
+                return false;
+
+            cardValue = suitOffset + rank;
+            return cardValue >= 0 && cardValue < 52;
+        }
+
+        private static bool TryParseHoleCardsToOHValues(string holeCardsText, out int card0, out int card1)
+        {
+            card0 = -1;
+            card1 = -1;
+
+            if (string.IsNullOrWhiteSpace(holeCardsText))
+                return false;
+
+            string compact = new string(holeCardsText.Where(char.IsLetterOrDigit).ToArray());
+
+            if (compact.Length < 4)
+                return false;
+
+            if (!TryParseCardToOHValue(compact[0], compact[1], out card0))
+                return false;
+
+            if (!TryParseCardToOHValue(compact[2], compact[3], out card1))
+                return false;
+
+            if (card0 == card1)
+                return false;
+
+            return true;
+        }
+
+        private static int RangeWeightToPrwWeight(float equity)
+        {
+            if (float.IsNaN(equity) || float.IsInfinity(equity) || equity <= 0.0000001f)
+                return 0;
+
+            int weight = (int)Math.Round(equity * PRW_WEIGHT_SCALE);
+
+            if (weight < 1)
+                weight = 1;
+
+            if (weight > PRW_WEIGHT_SCALE)
+                weight = PRW_WEIGHT_SCALE;
+
+            return weight;
+        }
+
+        private static void ClearPrwChairProfile(IntPtr prw1326Ptr, int physicalChair)
+        {
+            if (physicalChair < 0 || physicalChair >= PRW_MAX_CHAIRS)
+                return;
+
+            int chairOffset = PrwChairOffset(physicalChair);
+
+            Marshal.WriteInt32(prw1326Ptr, chairOffset + PRW_CHAIR_LEVEL_OFFSET, PRW_WEIGHT_SCALE);
+            Marshal.WriteInt32(prw1326Ptr, chairOffset + PRW_CHAIR_LIMIT_OFFSET, 0);
+            Marshal.WriteInt32(prw1326Ptr, chairOffset + PRW_CHAIR_IGNORE_OFFSET, 1);
+
+            int rankHiBase = chairOffset + PRW_CHAIR_RANKHI_OFFSET;
+            int rankLoBase = chairOffset + PRW_CHAIR_RANKLO_OFFSET;
+            int weightBase = chairOffset + PRW_CHAIR_WEIGHT_OFFSET;
+
+            for (int i = 0; i < PRW_HAND_COUNT; i++)
+            {
+                Marshal.WriteInt32(prw1326Ptr, rankHiBase + (i * 4), 0);
+                Marshal.WriteInt32(prw1326Ptr, rankLoBase + (i * 4), 0);
+                Marshal.WriteInt32(prw1326Ptr, weightBase + (i * 4), 0);
+            }
+        }
+
+        private static bool TryGetPhysicalChairForLogicalIndex(int logicalIndex, out int physicalChair)
+        {
+            physicalChair = -1;
+
+            if (CurrentChairs == null)
+                return false;
+
+            if (logicalIndex < 0 || logicalIndex >= CurrentChairs.Length)
+                return false;
+
+            physicalChair = CurrentChairs[logicalIndex];
+            return physicalChair >= 0 && physicalChair < PRW_MAX_CHAIRS;
+        }
+
+        private static int FillPrwChairProfileFromRange(IntPtr prw1326Ptr, int physicalChair, Player player)
+        {
+            if (physicalChair < 0 || physicalChair >= PRW_MAX_CHAIRS)
+                return 0;
+
+            if (player == null || player.Range == null || player.Range.Data == null)
+                return 0;
+
+            ClearPrwChairProfile(prw1326Ptr, physicalChair);
+
+            int chairOffset = PrwChairOffset(physicalChair);
+
+            int rankHiBase = chairOffset + PRW_CHAIR_RANKHI_OFFSET;
+            int rankLoBase = chairOffset + PRW_CHAIR_RANKLO_OFFSET;
+            int weightBase = chairOffset + PRW_CHAIR_WEIGHT_OFFSET;
+
+            int writeIndex = 0;
+            int length = Math.Min(PRW_HAND_COUNT, player.Range.Data.Length);
+
+            for (int i = 0; i < length && writeIndex < PRW_HAND_COUNT; i++)
+            {
+                var pair = player.Range.Data[i];
+
+                int weight = RangeWeightToPrwWeight(pair.Equity);
+
+                if (weight <= 0)
+                    continue;
+
+                int card0;
+                int card1;
+
+                if (!TryParseHoleCardsToOHValues(pair.GetHoleCards().ToString(), out card0, out card1))
+                    continue;
+
+                Marshal.WriteInt32(prw1326Ptr, rankHiBase + (writeIndex * 4), card0);
+                Marshal.WriteInt32(prw1326Ptr, rankLoBase + (writeIndex * 4), card1);
+                Marshal.WriteInt32(prw1326Ptr, weightBase + (writeIndex * 4), weight);
+
+                writeIndex++;
+            }
+
+            Marshal.WriteInt32(prw1326Ptr, chairOffset + PRW_CHAIR_LEVEL_OFFSET, PRW_WEIGHT_SCALE);
+            Marshal.WriteInt32(prw1326Ptr, chairOffset + PRW_CHAIR_LIMIT_OFFSET, writeIndex);
+            Marshal.WriteInt32(prw1326Ptr, chairOffset + PRW_CHAIR_IGNORE_OFFSET, writeIndex <= 0 ? 1 : 0);
+
+            return writeIndex;
+        }
+
+        private static bool IsBridgeReadyForEnhancedPrWin()
+        {
+            if (_gameState == null)
+                return false;
+
+            if (_handSyncFailed || _streetSyncFailed)
+                return false;
+
+            if (_gameState.getStreet() == Street.PreFlop)
+                return false;
+
+            if (CurrentChairs == null)
+                return false;
+
+            return true;
+        }
+
+        [DllExport("G5Bridge_UpdateEnhancedPrWinProfile", CallingConvention = CallingConvention.StdCall)]
+        [MethodImpl(MethodImplOptions.Synchronized)]
+        public static int UpdateEnhancedPrWinProfile(
+            IntPtr prw1326Ptr,
+            int currentStreet,
+            int rootUseMeOffset,
+            int rootPreflopOffset,
+            int rootUseCallbackOffset,
+            int chairArrayOffset,
+            int chairSize,
+            int chairLevelOffset,
+            int chairLimitOffset,
+            int chairIgnoreOffset,
+            int chairRankHiOffset,
+            int chairRankLoOffset,
+            int chairWeightOffset)
+        {
+            _lastEnhancedPrWinStreet = 0;
+
+            if (prw1326Ptr == IntPtr.Zero)
+                return 0;
+
+            if (currentStreet < 2 || currentStreet > 4)
+                return 0;
+
+            if (!IsBridgeReadyForEnhancedPrWin())
+                return 0;
+			
+			            if (!ConfigurePrwLayout(
+                rootUseMeOffset,
+                rootPreflopOffset,
+                rootUseCallbackOffset,
+                chairArrayOffset,
+                chairSize,
+                chairLevelOffset,
+                chairLimitOffset,
+                chairIgnoreOffset,
+                chairRankHiOffset,
+                chairRankLoOffset,
+                chairWeightOffset))
+            {
+                return 0;
+            }
+
+            try
+            {
+                Marshal.WriteInt32(prw1326Ptr, PRW_USEME_OFFSET, PRW_HAND_COUNT);
+                Marshal.WriteInt32(prw1326Ptr, PRW_PREFLOP_OFFSET, 0);
+                Marshal.WriteInt32(prw1326Ptr, PRW_USECALLBACK_OFFSET, PRW_HAND_COUNT);
+
+                for (int chair = 0; chair < PRW_MAX_CHAIRS; chair++)
+                    ClearPrwChairProfile(prw1326Ptr, chair);
+
+                int updatedOpponents = 0;
+                int totalActiveWeights = 0;
+                var players = _gameState.getPlayers();
+
+                for (int logicalIndex = 0; logicalIndex < players.Count; logicalIndex++)
+                {
+                    if (logicalIndex == _gameState.getHeroInd())
+                        continue;
+
+                    Player player = players[logicalIndex];
+
+                    if (player.StatusInHand == Status.Folded)
+                        continue;
+
+                    int physicalChair;
+
+                    if (!TryGetPhysicalChairForLogicalIndex(logicalIndex, out physicalChair))
+                        continue;
+
+                    int activeWeights = FillPrwChairProfileFromRange(prw1326Ptr, physicalChair, player);
+
+                    if (activeWeights > 0)
+                    {
+                        updatedOpponents++;
+                        totalActiveWeights += activeWeights;
+                    }
+                }
+
+                if (updatedOpponents <= 0)
+                    return 0;
+
+                _lastEnhancedPrWinStreet = currentStreet;
+
+                                Log($"[EnhancedPrWin] perfil atualizado: streetOH={currentStreet}, streetG5={_gameState.getStreet()}, oponentes={updatedOpponents}, combosAtivos={totalActiveWeights}.");
+                return 1;
+            }
+            catch (Exception ex)
+            {
+                Log($"[EnhancedPrWin] ERRO ao atualizar perfil prw1326: {ex.GetType().Name}: {ex.Message}");
+
+                if (IsDiagnosticLogEnabled())
+                    Log(ex.ToString());
+
+                return 0;
+            }
+        }
+
+        [DllExport("G5Bridge_SetOHEquitySnapshot", CallingConvention = CallingConvention.StdCall)]
+        [MethodImpl(MethodImplOptions.Synchronized)]
+        public static void SetOHEquitySnapshot(
+            double prwin,
+            double prtie,
+            double prlos,
+            double prwinnow,
+            double prlosnow,
+            double nhands,
+            double nhandshi,
+            double nhandslo,
+            double nhandsti)
+        {
+            _lastOHEquitySnapshot = new OHEquitySnapshot
+            {
+                IsValid = true,
+                IsEnhancedProfile = (_lastEnhancedPrWinStreet >= 2 && _lastEnhancedPrWinStreet <= 4),
+                ReceivedAt = DateTime.Now,
+                OhStreet = _lastEnhancedPrWinStreet,
+                PrWin = SafeDouble(prwin),
+                PrTie = SafeDouble(prtie),
+                PrLos = SafeDouble(prlos),
+                PrWinNow = SafeDouble(prwinnow),
+                PrLosNow = SafeDouble(prlosnow),
+                NHands = SafeDouble(nhands),
+                NHandsHi = SafeDouble(nhandshi),
+                NHandsLo = SafeDouble(nhandslo),
+                NHandsTi = SafeDouble(nhandsti)
+            };
+
+                       Log($"[EnhancedPrWin OH] snapshot recebido: prwin={_lastOHEquitySnapshot.PrWin:F4}, prtie={_lastOHEquitySnapshot.PrTie:F4}, prlos={_lastOHEquitySnapshot.PrLos:F4}, nhands={_lastOHEquitySnapshot.NHands:F0}.");
+        }
 
         public static string GetChairName(int physicalChair)
         {
@@ -279,12 +867,31 @@ HeroLogicalIndex = heroIndex;
                 ? m.Value
                 : (tableTitle ?? "").Split(new char[] { ',', ' ', '-' })[0].Trim();
 
-            _numPlayers = numPlayers;
-            _buttonIndex = buttonIndex;
+_numPlayers = numPlayers;
+_buttonIndex = buttonIndex;
 
-            Log("===========================  NOVA MAO  ===========================");
-            Log($"[NewHand] table={_targetTableId} players={numPlayers} hero={heroIndex} btn={buttonIndex} bb={bigBlind}");
-            if (stacks != null) Log($"[NewHand] stacks=[{string.Join(", ", stacks)}]");
+Log("===========================  NOVA MAO  ===========================");
+Log($"[NewHand] table={_targetTableId} players={numPlayers} hero={heroIndex} btn={buttonIndex} bb={bigBlind}");
+if (stacks != null) Log($"[NewHand] stacks=[{string.Join(", ", stacks)}]");
+
+if (stacks == null || chairs == null ||
+    numPlayers < 2 ||
+    stacks.Length < numPlayers ||
+    chairs.Length < numPlayers ||
+    heroIndex < 0 || heroIndex >= numPlayers ||
+    buttonIndex < 0 || buttonIndex >= numPlayers ||
+    bigBlind <= 0)
+{
+    _gameState = null;
+    _handSyncFailed = true;
+
+    Log($"[NewHand] ERRO DE ESTADO: parametros invalidos. " +
+        $"players={numPlayers}, hero={heroIndex}, btn={buttonIndex}, bb={bigBlind}, " +
+        $"stacksLen={(stacks == null ? -1 : stacks.Length)}, chairsLen={(chairs == null ? -1 : chairs.Length)}. " +
+        $"Mao bloqueada ate o proximo NewHand valido.");
+
+    return;
+}
 
             if (EnableXML)
                 HHParser.AtualizarMesa(_targetTableId, numPlayers, bigBlind, heroIndex, chairs);
@@ -621,6 +1228,15 @@ if (_handSyncFailed || _streetSyncFailed)
     return result;
 }
 
+
+if (_gameState.getStreet() != Street.PreFlop)
+{
+    Log($"[GetDecision] Pós-flop bloqueado na G5Bridge. " +
+        $"A Fase 2 usa OH EnhancedPrWin na user.dll e nao calcula _gameState.calculateHeroAction() no pós-flop.");
+    Log("------------------------------------------------");
+    return result;
+}
+
             try
             {
                 int playerToAct = _gameState.getPlayerToActInd();
@@ -650,8 +1266,11 @@ if (_handSyncFailed || _streetSyncFailed)
                 result.checkCallEV = d.checkCallEV;
                 result.betRaiseEV = d.betRaiseEV;
 
-                Log($"[GetDecision] DECISAO: {GetActionName(result.actionType)} by {d.byAmount}");
-                Log($"[GetDecision] EVs: cc={d.checkCallEV:F3} br={d.betRaiseEV:F3}");
+                bool ohEquityFloorApplied = ApplyOHEquityCallFloor(ref result);
+
+                Log($"[GetDecision] DECISAO: {GetActionName(result.actionType)} by {result.byAmount}");
+                Log($"[GetDecision] EVs: cc={result.checkCallEV:F3} br={result.betRaiseEV:F3}");
+                Log($"[GetDecision] OH Equity Floor aplicado: {ohEquityFloorApplied}");
                 Log($"[GetDecision] Motivo: {d.message}");
 
                 if (result.actionType == 0)

@@ -4,7 +4,25 @@
 #include <windows.h>
 #include <string>
 #include <stdio.h>
+#include <string.h>
+#include <stddef.h>
 #include "OpenHoldemFunctions.h"
+
+// =============================================================================
+// EXPORTS CANONICAS PARA OPENHOLDEM WIN32
+//
+// Em Win32, funções C/C++ podem sair decoradas no export table. O OpenHoldem
+// procura a entrada canonica "process_message". Esta diretiva garante que,
+// além do nome decorado gerado pelo compilador, a DLL também exponha exatamente
+// o nome que o OH espera.
+//
+// Mantemos também process_query como rota compatível com os exemplos oficiais,
+// embora a rota principal do projeto continue sendo dll$decisao -> ProcessQuery.
+// =============================================================================
+#if defined(_M_IX86)
+#pragma comment(linker, "/EXPORT:process_message=_process_message")
+#pragma comment(linker, "/EXPORT:process_query=_process_query")
+#endif
 
 #pragma pack(push, 4)
 struct DecisionResult {
@@ -20,19 +38,145 @@ enum G5Action {
     ACT_BET = 3, ACT_RAISE = 4, ACT_ALLIN = 5
 };
 
+// =============================================================================
+// ENHANCED PRWIN / PRW1326
+//
+// O OH entrega um ponteiro para esta estrutura via process_message("prw1326").
+// A user.dll mantém uma imagem local, atualizada pelo G5Bridge, e o callback
+// copia essa imagem para a estrutura real imediatamente antes do loop do PrWin.
+// =============================================================================
+struct sprw1326_chair
+{
+    int level;
+    int limit;
+    int ignore;
+    int rankhi[1326];
+    int ranklo[1326];
+    int weight[1326];
+    double scratch;
+};
+
+struct sprw1326
+{
+    int useme;
+    int preflop;
+    int usecallback;
+    double (*prw_callback)(void);
+    double scratch;
+    sprw1326_chair vanilla_chair;
+    sprw1326_chair chair[10];
+};
+
+typedef sprw1326* pp13;
+
+static pp13 g_prw1326 = nullptr;
+static sprw1326 g_localPrw1326 = {};
+static bool g_localPrw1326Ready = false;
+
+// Ponteiros entregues pelo OpenHoldem via process_message.
+// Nesta versão do OH, porém, o prw1326 correto vem pela interface exportada
+// GetPrw1326(), declarada em OpenHoldemFunctions.h.
+typedef double (*pfgws_t)(int chair, const char* psym, bool& iserr);
+
+static const void* g_lastOHStatePtr = nullptr;
+static const void* g_phl1kPtr = nullptr;
+static pfgws_t g_pfgws = nullptr;
+
+static bool g_loggedMsgLoad = false;
+static bool g_loggedMsgUnload = false;
+static bool g_loggedMsgState = false;
+static bool g_loggedMsgPhl1k = false;
+static bool g_loggedMsgPrw1326 = false;
+static bool g_loggedMsgPfgws = false;
+static bool g_loggedMsgQuery = false;
+
+static bool g_loggedGetPrw1326DirectOk = false;
+static bool g_loggedGetPrw1326DirectNull = false;
+
+static volatile LONG g_enhancedPrWinProfileVersion = 0;
+static volatile LONG g_enhancedPrWinLastCallbackVersion = 0;
+static volatile LONG g_enhancedPrWinCallbackCount = 0;
+static bool g_lastPostFlopDecisionUsedEnhancedPrWin = false;
+
+static double EnhancedPrWinCallback(void);
+static const char* StreetName(int s);
+static const char* ActionName(int a);
+DLL_IMPLEMENTS double __stdcall ProcessQuery(const char* pquery);
+extern "C" __declspec(dllexport) double process_query(const char* pquery);
+
+static LONG ReadInterlockedLong(volatile LONG* value)
+{
+    return InterlockedCompareExchange(value, 0, 0);
+}
+
+static bool g_loggedEnhancedPrWinNativeLayout = false;
+
+static void LogEnhancedPrWinNativeLayoutOnce()
+{
+    if (g_loggedEnhancedPrWinNativeLayout)
+        return;
+
+    g_loggedEnhancedPrWinNativeLayout = true;
+
+    WriteLog(
+        "[user.cpp] EnhancedPrWin layout nativo: sizeof(chair)=%u sizeof(root)=%u "
+        "root(useme=%u preflop=%u usecallback=%u vanilla=%u chairArray=%u) "
+        "chair(level=%u limit=%u ignore=%u rankhi=%u ranklo=%u weight=%u scratch=%u).\n",
+        (unsigned)sizeof(sprw1326_chair),
+        (unsigned)sizeof(sprw1326),
+        (unsigned)offsetof(sprw1326, useme),
+        (unsigned)offsetof(sprw1326, preflop),
+        (unsigned)offsetof(sprw1326, usecallback),
+        (unsigned)offsetof(sprw1326, vanilla_chair),
+        (unsigned)offsetof(sprw1326, chair),
+        (unsigned)offsetof(sprw1326_chair, level),
+        (unsigned)offsetof(sprw1326_chair, limit),
+        (unsigned)offsetof(sprw1326_chair, ignore),
+        (unsigned)offsetof(sprw1326_chair, rankhi),
+        (unsigned)offsetof(sprw1326_chair, ranklo),
+        (unsigned)offsetof(sprw1326_chair, weight),
+        (unsigned)offsetof(sprw1326_chair, scratch));
+}
+
 typedef void(__stdcall* FN_NewHand)      (int* stacks, int* chairs, int heroIndex, int buttonIndex, int numPlayers, int bigBlind, const char* basePath, const char* tableTitle);
 typedef void(__stdcall* FN_DealHoleCards)(const char* card0, const char* card1);
 typedef void(__stdcall* FN_NewAction)    (int playerIndex, int actionType, int byAmount);
 typedef void(__stdcall* FN_GoToNextStreet)(const char* c0, const char* c1, const char* c2, int numCards);
 typedef DecisionResult(__stdcall* FN_GetDecision)();
+typedef int(__stdcall* FN_UpdateEnhancedPrWinProfile)(
+    void* prw1326Ptr,
+    int currentStreet,
+    int rootUseMeOffset,
+    int rootPreflopOffset,
+    int rootUseCallbackOffset,
+    int chairArrayOffset,
+    int chairSize,
+    int chairLevelOffset,
+    int chairLimitOffset,
+    int chairIgnoreOffset,
+    int chairRankHiOffset,
+    int chairRankLoOffset,
+    int chairWeightOffset);
+typedef void(__stdcall* FN_SetOHEquitySnapshot)(
+    double prwin,
+    double prtie,
+    double prlos,
+    double prwinnow,
+    double prlosnow,
+    double nhands,
+    double nhandshi,
+    double nhandslo,
+    double nhandsti);
 
 static HINSTANCE         hBridge = NULL;
 static FN_NewHand        pNewHand = nullptr;
 static FN_DealHoleCards  pDealHoleCards = nullptr;
 static FN_NewAction      pNewAction = nullptr;
 static FN_GoToNextStreet pGoToNextStreet = nullptr;
-static FN_GetDecision    pGetDecision = nullptr;
-static bool              g_bridgeLoaded = false;
+static FN_GetDecision                  pGetDecision = nullptr;
+static FN_UpdateEnhancedPrWinProfile   pUpdateEnhancedPrWinProfile = nullptr;
+static FN_SetOHEquitySnapshot          pSetOHEquitySnapshot = nullptr;
+static bool                            g_bridgeLoaded = false;
 
 // CAMINHO DINÂMICO
 static char g_g5BasePath[MAX_PATH] = "";
@@ -85,6 +229,842 @@ static bool IsAtLeast66PercentOf(int intended, int realAllInAmount) {
         return false;
 
     return intended * 100 >= realAllInAmount * 66;
+}
+
+static bool IsPostFlopStreet(int ohStreet)
+{
+    return ohStreet >= 2 && ohStreet <= 4;
+}
+
+static void ResetEnhancedPrWinProfileToVanilla()
+{
+    if (!g_prw1326)
+        return;
+
+    memset(&g_localPrw1326, 0, sizeof(g_localPrw1326));
+
+    g_localPrw1326.useme = 1326;
+    g_localPrw1326.preflop = 0;       // nosso uso será apenas flop/turn/river
+    g_localPrw1326.usecallback = 1326;
+    g_localPrw1326.prw_callback = EnhancedPrWinCallback;
+    g_localPrw1326.scratch = 0.0;
+
+    g_localPrw1326.vanilla_chair = g_prw1326->vanilla_chair;
+
+    for (int i = 0; i < 10; i++)
+    {
+        g_localPrw1326.chair[i] = g_prw1326->vanilla_chair;
+        g_localPrw1326.chair[i].ignore = 1;
+    }
+
+    g_localPrw1326Ready = true;
+}
+
+static void InstallEnhancedPrWinPointer(const void* param)
+{
+    if (!param)
+        return;
+
+    g_prw1326 = (pp13)param;
+    LogEnhancedPrWinNativeLayoutOnce();
+    ResetEnhancedPrWinProfileToVanilla();
+
+    if (g_prw1326)
+    {
+        g_prw1326->useme = 1326;
+        g_prw1326->preflop = 0;
+        g_prw1326->usecallback = 1326;
+        g_prw1326->prw_callback = EnhancedPrWinCallback;
+    }
+
+    WriteLog("[user.cpp] EnhancedPrWin: ponteiro prw1326 instalado. ptr=%p useme=%d usecallback=%d preflop=%d.\n",
+        g_prw1326,
+        g_prw1326 ? g_prw1326->useme : 0,
+        g_prw1326 ? g_prw1326->usecallback : 0,
+        g_prw1326 ? g_prw1326->preflop : 0);
+}
+
+static bool TryInstallEnhancedPrWinPointerFromOHInterface(const char* reason)
+{
+    if (g_prw1326)
+        return true;
+
+    void* ptr = nullptr;
+
+    __try
+    {
+        ptr = GetPrw1326();
+    }
+    __except (1)
+    {
+        WriteLog("[user.cpp] EnhancedPrWin: EXCECAO ao chamar GetPrw1326() (%s).\n",
+            reason ? reason : "sem contexto");
+        return false;
+    }
+
+    if (!ptr)
+    {
+        if (!g_loggedGetPrw1326DirectNull)
+        {
+            g_loggedGetPrw1326DirectNull = true;
+            WriteLog("[user.cpp] EnhancedPrWin: GetPrw1326() retornou NULL (%s).\n",
+                reason ? reason : "sem contexto");
+        }
+
+        return false;
+    }
+
+    InstallEnhancedPrWinPointer(ptr);
+
+    if (!g_loggedGetPrw1326DirectOk)
+    {
+        g_loggedGetPrw1326DirectOk = true;
+        WriteLog("[user.cpp] EnhancedPrWin: prw1326 obtido via GetPrw1326().\n");
+    }
+
+    return true;
+}
+
+static double EnhancedPrWinCallback(void)
+{
+    if (!g_prw1326 || !g_localPrw1326Ready)
+        return 0.0;
+
+    // Callback chamado dentro do ciclo do OH. Mantê-lo curto e sem log.
+    memcpy(g_prw1326, &g_localPrw1326, sizeof(sprw1326));
+
+    LONG currentVersion = ReadInterlockedLong(&g_enhancedPrWinProfileVersion);
+    InterlockedExchange(&g_enhancedPrWinLastCallbackVersion, currentVersion);
+    InterlockedIncrement(&g_enhancedPrWinCallbackCount);
+
+    return 0.0;
+}
+
+static bool UpdateEnhancedPrWinProfileFromBridge(int ohStreet)
+{
+    if (!IsPostFlopStreet(ohStreet))
+        return false;
+
+    if (!g_prw1326)
+    {
+        WriteLog("[user.cpp] EnhancedPrWin: prw1326 ainda nao recebido pelo OH.\n");
+        return false;
+    }
+
+    if (!g_localPrw1326Ready)
+        ResetEnhancedPrWinProfileToVanilla();
+
+    if (!pUpdateEnhancedPrWinProfile)
+    {
+        WriteLog("[user.cpp] EnhancedPrWin: G5Bridge_UpdateEnhancedPrWinProfile ainda nao exportada.\n");
+        return false;
+    }
+
+    int ok = 0;
+
+    __try
+    {
+        ok = pUpdateEnhancedPrWinProfile(
+            &g_localPrw1326,
+            ohStreet,
+            (int)offsetof(sprw1326, useme),
+            (int)offsetof(sprw1326, preflop),
+            (int)offsetof(sprw1326, usecallback),
+            (int)offsetof(sprw1326, chair),
+            (int)sizeof(sprw1326_chair),
+            (int)offsetof(sprw1326_chair, level),
+            (int)offsetof(sprw1326_chair, limit),
+            (int)offsetof(sprw1326_chair, ignore),
+            (int)offsetof(sprw1326_chair, rankhi),
+            (int)offsetof(sprw1326_chair, ranklo),
+            (int)offsetof(sprw1326_chair, weight));
+    }
+    __except (1)
+    {
+        WriteLog("[user.cpp] EnhancedPrWin: EXCECAO ao atualizar perfil pelo G5Bridge.\n");
+        ok = 0;
+    }
+
+    if (ok)
+    {
+        g_localPrw1326.useme = 1326;
+        g_localPrw1326.preflop = 0;
+        g_localPrw1326.usecallback = 1326;
+        g_localPrw1326.prw_callback = EnhancedPrWinCallback;
+        g_localPrw1326Ready = true;
+
+        LONG profileVersion = InterlockedIncrement(&g_enhancedPrWinProfileVersion);
+
+        WriteLog("[user.cpp] EnhancedPrWin: perfil pos-flop atualizado pelo G5Bridge para street=%s versao=%ld.\n",
+            StreetName(ohStreet), profileVersion);
+
+        return true;
+    }
+
+    WriteLog("[user.cpp] EnhancedPrWin: G5Bridge nao atualizou perfil; decisao pos-flop nao usara perfil vanilla.\n");
+    return false;
+}
+
+static double ReadOHSymbolSafe(const char* symbol)
+{
+    __try
+    {
+        return GetSymbol(symbol);
+    }
+    __except (1)
+    {
+        return 0.0;
+    }
+}
+
+struct OHEquityReadout
+{
+    double prwin;
+    double prtie;
+    double prlos;
+    double prwinnow;
+    double prlosnow;
+    double nhands;
+    double nhandshi;
+    double nhandslo;
+    double nhandsti;
+};
+
+static int ReadCentsSafe(const char* symbol)
+{
+    double val = ReadOHSymbolSafe(symbol);
+
+    if (val <= 0.0)
+        return 0;
+
+    return (int)(val * 100.0 + 0.5);
+}
+
+static bool IsFiniteNumber(double value)
+{
+    return value == value && value > -1.0e300 && value < 1.0e300;
+}
+
+static double Clamp01Double(double value)
+{
+    if (!IsFiniteNumber(value))
+        return 0.0;
+
+    if (value < 0.0)
+        return 0.0;
+
+    if (value > 1.0)
+        return 1.0;
+
+    return value;
+}
+
+static void ReadOHEquityReadout(OHEquityReadout& eq)
+{
+    eq.prwin = ReadOHSymbolSafe("prwin");
+    eq.prtie = ReadOHSymbolSafe("prtie");
+    eq.prlos = ReadOHSymbolSafe("prlos");
+    eq.prwinnow = ReadOHSymbolSafe("prwinnow");
+    eq.prlosnow = ReadOHSymbolSafe("prlosnow");
+    eq.nhands = ReadOHSymbolSafe("nhands");
+    eq.nhandshi = ReadOHSymbolSafe("nhandshi");
+    eq.nhandslo = ReadOHSymbolSafe("nhandslo");
+    eq.nhandsti = ReadOHSymbolSafe("nhandsti");
+}
+
+static void SendOHEquitySnapshotToBridgeValues(const OHEquityReadout& eq)
+{
+    if (!pSetOHEquitySnapshot)
+        return;
+
+    __try
+    {
+        pSetOHEquitySnapshot(
+            eq.prwin,
+            eq.prtie,
+            eq.prlos,
+            eq.prwinnow,
+            eq.prlosnow,
+            eq.nhands,
+            eq.nhandshi,
+            eq.nhandslo,
+            eq.nhandsti);
+    }
+    __except (1)
+    {
+        WriteLog("[user.cpp] EnhancedPrWin: EXCECAO ao enviar snapshot OH para G5Bridge.\n");
+        return;
+    }
+
+    WriteLog("[user.cpp] EnhancedPrWin Snapshot OH: prwin=%.4f prtie=%.4f prlos=%.4f prwinnow=%.4f prlosnow=%.4f nhands=%.0f.\n",
+        eq.prwin, eq.prtie, eq.prlos, eq.prwinnow, eq.prlosnow, eq.nhands);
+}
+
+static void SendOHEquitySnapshotToBridge(int ohStreet)
+{
+    if (!IsPostFlopStreet(ohStreet))
+        return;
+
+    OHEquityReadout eq = {};
+    ReadOHEquityReadout(eq);
+    SendOHEquitySnapshotToBridgeValues(eq);
+}
+
+static bool TryComputeOHEquity01(const OHEquityReadout& eq, double& equity)
+{
+    equity = 0.0;
+
+    if (!IsFiniteNumber(eq.prwin) || !IsFiniteNumber(eq.prtie) || !IsFiniteNumber(eq.prlos))
+        return false;
+
+    double prwin = eq.prwin;
+    double prtie = eq.prtie;
+    double prlos = eq.prlos;
+
+    double sum = prwin + prtie + prlos;
+
+    // OpenHoldem normalmente retorna 0..1.
+    // Esta protecao cobre ambientes que exponham 0..100.
+    if (sum > 1.5)
+    {
+        prwin /= 100.0;
+        prtie /= 100.0;
+        prlos /= 100.0;
+        sum = prwin + prtie + prlos;
+    }
+
+    if (!IsFiniteNumber(sum) || sum <= 0.000001)
+        return false;
+
+    equity = Clamp01Double(prwin + (0.5 * prtie));
+    return true;
+}
+
+static int GetPostFlopAmountToCallCents()
+{
+    if (g_heroChair < 0 || g_heroChair >= 10)
+        return 0;
+
+    int heroBet = ReadChairCurrentBet(g_heroChair);
+    int maxBet = heroBet;
+
+    for (int chair = 0; chair < 10; chair++)
+    {
+        if (!g_isActive[chair])
+            continue;
+
+        int chairBet = ReadChairCurrentBet(chair);
+
+        if (chairBet > maxBet)
+            maxBet = chairBet;
+    }
+
+    int amountToCall = maxBet - heroBet;
+
+    if (amountToCall < 0)
+        amountToCall = 0;
+
+    int heroBalance = ReadChairBalance(g_heroChair);
+
+    if (heroBalance > 0 && amountToCall > heroBalance)
+        amountToCall = heroBalance;
+
+    return amountToCall;
+}
+
+static bool EnsurePrw1326PointerAvailable()
+{
+    if (g_prw1326)
+        return true;
+
+    WriteLog("[user.cpp] EnhancedPrWin: prw1326 ausente; buscando via GetPrw1326().\n");
+
+    if (TryInstallEnhancedPrWinPointerFromOHInterface("EnsurePrw1326PointerAvailable"))
+        return true;
+
+    WriteLog("[user.cpp] EnhancedPrWin: prw1326 indisponivel via GetPrw1326().\n");
+    return false;
+}
+
+static bool WasEnhancedPrWinCallbackUsedForCurrentProfile()
+{
+    LONG profileVersion = ReadInterlockedLong(&g_enhancedPrWinProfileVersion);
+    LONG callbackVersion = ReadInterlockedLong(&g_enhancedPrWinLastCallbackVersion);
+
+    return profileVersion > 0 && callbackVersion == profileVersion;
+}
+
+static bool ForceOpenHoldemPrWinRecalculation(int ohStreet)
+{
+    if (!IsPostFlopStreet(ohStreet))
+        return false;
+
+    if (!g_prw1326)
+        return false;
+
+    LONG profileVersionBefore = ReadInterlockedLong(&g_enhancedPrWinProfileVersion);
+    LONG callbackVersionBefore = ReadInterlockedLong(&g_enhancedPrWinLastCallbackVersion);
+    LONG callbackCountBefore = ReadInterlockedLong(&g_enhancedPrWinCallbackCount);
+
+    __try
+    {
+        (void)GetSymbol("cmd$recalc");
+    }
+    __except (1)
+    {
+        WriteLog("[user.cpp] EnhancedPrWin: EXCECAO ao executar cmd$recalc.\n");
+        return false;
+    }
+
+    LONG profileVersionAfter = ReadInterlockedLong(&g_enhancedPrWinProfileVersion);
+    LONG callbackVersionAfter = ReadInterlockedLong(&g_enhancedPrWinLastCallbackVersion);
+    LONG callbackCountAfter = ReadInterlockedLong(&g_enhancedPrWinCallbackCount);
+
+    if (profileVersionAfter <= 0 || callbackVersionAfter != profileVersionAfter)
+    {
+        WriteLog("[user.cpp] EnhancedPrWin: cmd$recalc executado, mas callback nao confirmou perfil atual. perfilAntes=%ld callbackAntes=%ld perfilDepois=%ld callbackDepois=%ld callbacks=%ld->%ld.\n",
+            profileVersionBefore,
+            callbackVersionBefore,
+            profileVersionAfter,
+            callbackVersionAfter,
+            callbackCountBefore,
+            callbackCountAfter);
+
+        return false;
+    }
+
+    WriteLog("[user.cpp] EnhancedPrWin: cmd$recalc concluido com perfil confirmado. street=%s perfil=%ld callbacks=%ld->%ld.\n",
+        StreetName(ohStreet),
+        profileVersionAfter,
+        callbackCountBefore,
+        callbackCountAfter);
+
+    return true;
+}
+
+static int ClampIntCents(int value, int minValue, int maxValue)
+{
+    if (value < minValue)
+        return minValue;
+
+    if (value > maxValue)
+        return maxValue;
+
+    return value;
+}
+
+static int GetPostFlopMaxCurrentBetCents()
+{
+    int maxBet = 0;
+
+    for (int chair = 0; chair < 10; chair++)
+    {
+        if (!g_isActive[chair])
+            continue;
+
+        int chairBet = ReadChairCurrentBet(chair);
+
+        if (chairBet > maxBet)
+            maxBet = chairBet;
+    }
+
+    return maxBet;
+}
+
+static int GetHeroTotalStackCents()
+{
+    if (g_heroChair < 0 || g_heroChair >= 10)
+        return 0;
+
+    return ReadChairBalance(g_heroChair) + ReadChairCurrentBet(g_heroChair);
+}
+
+static int GetPostFlopPotBeforeCallCents()
+{
+    int pot = ReadCentsSafe("pot");
+
+    if (pot > 0)
+        return pot;
+
+    int commonPot = ReadCentsSafe("potcommon");
+    int streetBets = 0;
+
+    for (int chair = 0; chair < 10; chair++)
+    {
+        if (!g_isActive[chair])
+            continue;
+
+        streetBets += ReadChairCurrentBet(chair);
+    }
+
+    pot = commonPot + streetBets;
+
+    if (pot <= 0)
+        pot = commonPot;
+
+    if (pot <= 0)
+        pot = streetBets;
+
+    if (pot <= 0)
+        pot = 1;
+
+    return pot;
+}
+
+static int GetPostFlopPotCents()
+{
+    return GetPostFlopPotBeforeCallCents();
+}
+
+static double PostFlopValueThreshold(int ohStreet, bool facingBet)
+{
+    if (ohStreet == 2)
+        return facingBet ? 0.66 : 0.62;
+
+    if (ohStreet == 3)
+        return facingBet ? 0.63 : 0.60;
+
+    if (ohStreet == 4)
+        return facingBet ? 0.60 : 0.56;
+
+    return facingBet ? 0.66 : 0.62;
+}
+
+static double PostFlopRaiseMargin(int ohStreet)
+{
+    if (ohStreet == 2)
+        return 0.18;
+
+    if (ohStreet == 3)
+        return 0.15;
+
+    if (ohStreet == 4)
+        return 0.12;
+
+    return 0.18;
+}
+
+static double PostFlopBetFraction(double equity)
+{
+    if (equity >= 0.82)
+        return 0.75;
+
+    if (equity >= 0.72)
+        return 0.66;
+
+    return 0.50;
+}
+
+static int BuildPostFlopBetOrRaiseToTotalCents(int amountToCall, int potBeforeCall, double equity)
+{
+    int heroBet = ReadChairCurrentBet(g_heroChair);
+    int heroBalance = ReadChairBalance(g_heroChair);
+    int heroTotal = heroBet + heroBalance;
+
+    if (heroTotal <= heroBet)
+        return heroBet;
+
+    int maxBet = GetPostFlopMaxCurrentBetCents();
+    int bb = ReadCentsSafe("bblind");
+
+    if (bb <= 0)
+        bb = 1;
+
+    double fraction = PostFlopBetFraction(equity);
+
+    if (amountToCall <= 0)
+    {
+        int betSize = (int)(potBeforeCall * fraction + 0.5);
+
+        if (betSize < bb)
+            betSize = bb;
+
+        int raiseToTotal = heroBet + betSize;
+        return ClampIntCents(raiseToTotal, heroBet, heroTotal);
+    }
+
+    int potAfterCall = potBeforeCall + amountToCall;
+
+    if (potAfterCall <= 0)
+        potAfterCall = amountToCall;
+
+    int raiseExtra = (int)(potAfterCall * fraction + 0.5);
+
+    if (raiseExtra < amountToCall)
+        raiseExtra = amountToCall;
+
+    int raiseToTotal = heroBet + amountToCall + raiseExtra;
+    int minRaiseToTotal = maxBet + amountToCall;
+
+    if (raiseToTotal < minRaiseToTotal)
+        raiseToTotal = minRaiseToTotal;
+
+    return ClampIntCents(raiseToTotal, heroBet + amountToCall, heroTotal);
+}
+
+static bool ShouldConvertPostFlopRaiseToAllIn(int raiseToTotal)
+{
+    int heroTotal = GetHeroTotalStackCents();
+
+    if (heroTotal <= 0)
+        return false;
+
+    return raiseToTotal * 100 >= heroTotal * 80;
+}
+
+static DecisionResult BuildPostFlopDecisionFromEnhancedPrWin(int ohStreet)
+{
+    DecisionResult d = {};
+    d.actionType = ACT_FOLD;
+    d.byAmount = 0;
+    d.checkCallEV = 0.0f;
+    d.betRaiseEV = 0.0f;
+
+    int amountToCall = GetPostFlopAmountToCallCents();
+    int potBeforeCall = GetPostFlopPotBeforeCallCents();
+    bool facingBet = amountToCall > 0;
+
+    g_lastPostFlopDecisionUsedEnhancedPrWin = false;
+
+    if (!EnsurePrw1326PointerAvailable())
+    {
+        if (facingBet)
+        {
+            d.actionType = ACT_FOLD;
+            d.byAmount = amountToCall;
+
+            WriteLog("[user.cpp] OH PostFlop Decision: EnhancedPrWin sem ponteiro prw1326 -> Fold seguro. call=$%.2f pot=$%.2f.\n",
+                amountToCall / 100.0, potBeforeCall / 100.0);
+        }
+        else
+        {
+            d.actionType = ACT_CHECK;
+            d.byAmount = 0;
+
+            WriteLog("[user.cpp] OH PostFlop Decision: EnhancedPrWin sem ponteiro prw1326 e sem aposta para pagar -> Check seguro.\n");
+        }
+
+        return d;
+    }
+
+    bool enhancedReady = UpdateEnhancedPrWinProfileFromBridge(ohStreet);
+
+    if (!enhancedReady)
+    {
+        if (facingBet)
+        {
+            d.actionType = ACT_FOLD;
+            d.byAmount = amountToCall;
+
+            WriteLog("[user.cpp] OH PostFlop Decision: perfil EnhancedPrWin nao atualizado -> Fold seguro. call=$%.2f pot=$%.2f.\n",
+                amountToCall / 100.0, potBeforeCall / 100.0);
+        }
+        else
+        {
+            d.actionType = ACT_CHECK;
+            d.byAmount = 0;
+
+            WriteLog("[user.cpp] OH PostFlop Decision: perfil EnhancedPrWin nao atualizado e sem aposta para pagar -> Check seguro.\n");
+        }
+
+        return d;
+    }
+
+    if (!ForceOpenHoldemPrWinRecalculation(ohStreet))
+    {
+        if (facingBet)
+        {
+            d.actionType = ACT_FOLD;
+            d.byAmount = amountToCall;
+
+            WriteLog("[user.cpp] OH PostFlop Decision: EnhancedPrWin nao confirmou recalc/callback -> Fold seguro. call=$%.2f pot=$%.2f.\n",
+                amountToCall / 100.0, potBeforeCall / 100.0);
+        }
+        else
+        {
+            d.actionType = ACT_CHECK;
+            d.byAmount = 0;
+
+            WriteLog("[user.cpp] OH PostFlop Decision: EnhancedPrWin nao confirmou recalc/callback e sem aposta para pagar -> Check seguro.\n");
+        }
+
+        return d;
+    }
+
+    OHEquityReadout eq = {};
+    ReadOHEquityReadout(eq);
+    SendOHEquitySnapshotToBridgeValues(eq);
+
+    bool enhancedActuallyUsed = WasEnhancedPrWinCallbackUsedForCurrentProfile();
+    g_lastPostFlopDecisionUsedEnhancedPrWin = enhancedActuallyUsed;
+
+    if (!enhancedActuallyUsed)
+    {
+        LONG profileVersion = ReadInterlockedLong(&g_enhancedPrWinProfileVersion);
+        LONG callbackVersion = ReadInterlockedLong(&g_enhancedPrWinLastCallbackVersion);
+        LONG callbackCount = ReadInterlockedLong(&g_enhancedPrWinCallbackCount);
+
+        if (facingBet)
+        {
+            d.actionType = ACT_FOLD;
+            d.byAmount = amountToCall;
+
+            WriteLog("[user.cpp] OH PostFlop Decision: perfil EnhancedPrWin atualizado, mas callback ainda nao executou para a versao atual -> Fold seguro. perfil=%ld callback=%ld totalCallbacks=%ld.\n",
+                profileVersion, callbackVersion, callbackCount);
+        }
+        else
+        {
+            d.actionType = ACT_CHECK;
+            d.byAmount = 0;
+
+            WriteLog("[user.cpp] OH PostFlop Decision: perfil EnhancedPrWin atualizado, mas callback ainda nao executou para a versao atual -> Check seguro. perfil=%ld callback=%ld totalCallbacks=%ld.\n",
+                profileVersion, callbackVersion, callbackCount);
+        }
+
+        return d;
+    }
+
+    double equity = 0.0;
+
+    if (!TryComputeOHEquity01(eq, equity))
+    {
+        if (facingBet)
+        {
+            d.actionType = ACT_FOLD;
+            d.byAmount = amountToCall;
+
+            WriteLog("[user.cpp] OH PostFlop Decision: equity OH invalida -> Fold seguro. prwin=%.4f prtie=%.4f prlos=%.4f nhands=%.0f.\n",
+                eq.prwin, eq.prtie, eq.prlos, eq.nhands);
+        }
+        else
+        {
+            d.actionType = ACT_CHECK;
+            d.byAmount = 0;
+
+            WriteLog("[user.cpp] OH PostFlop Decision: equity OH invalida e sem aposta para pagar -> Check seguro. prwin=%.4f prtie=%.4f prlos=%.4f nhands=%.0f.\n",
+                eq.prwin, eq.prtie, eq.prlos, eq.nhands);
+        }
+
+        return d;
+    }
+
+    if (eq.nhands > 0.0 && eq.nhands < 100.0)
+    {
+        if (facingBet)
+        {
+            d.actionType = ACT_FOLD;
+            d.byAmount = amountToCall;
+
+            WriteLog("[user.cpp] OH PostFlop Decision: nhands insuficiente para decisao robusta -> Fold seguro. nhands=%.0f.\n",
+                eq.nhands);
+        }
+        else
+        {
+            d.actionType = ACT_CHECK;
+            d.byAmount = 0;
+
+            WriteLog("[user.cpp] OH PostFlop Decision: nhands insuficiente para bet robusto -> Check. nhands=%.0f.\n",
+                eq.nhands);
+        }
+
+        return d;
+    }
+
+    double potAfterCall = (double)potBeforeCall + (double)amountToCall;
+
+    if (potAfterCall <= 0.0)
+        potAfterCall = (double)amountToCall;
+
+    double requiredEquity = facingBet
+        ? ((double)amountToCall / potAfterCall)
+        : 0.0;
+
+    double callEV = facingBet
+        ? ((equity * potAfterCall) - (double)amountToCall)
+        : 0.0;
+
+    d.byAmount = amountToCall;
+    d.checkCallEV = (float)(callEV / 100.0);
+    d.betRaiseEV = 0.0f;
+
+    bool valueAggression =
+        equity >= PostFlopValueThreshold(ohStreet, facingBet) &&
+        (!facingBet || equity >= requiredEquity + PostFlopRaiseMargin(ohStreet));
+
+    if (valueAggression)
+    {
+        int raiseToTotal = BuildPostFlopBetOrRaiseToTotalCents(amountToCall, potBeforeCall, equity);
+        int heroBet = ReadChairCurrentBet(g_heroChair);
+        int heroTotal = GetHeroTotalStackCents();
+        int minUsefulTotal = facingBet ? heroBet + amountToCall + 1 : heroBet + 1;
+
+        if (raiseToTotal >= heroTotal && heroTotal > heroBet)
+        {
+            d.actionType = ACT_ALLIN;
+            d.byAmount = heroTotal;
+        }
+        else if (ShouldConvertPostFlopRaiseToAllIn(raiseToTotal))
+        {
+            d.actionType = ACT_ALLIN;
+            d.byAmount = heroTotal;
+        }
+        else if (raiseToTotal >= minUsefulTotal)
+        {
+            d.actionType = facingBet ? ACT_RAISE : ACT_BET;
+            d.byAmount = raiseToTotal;
+        }
+
+        if (d.actionType == ACT_BET || d.actionType == ACT_RAISE || d.actionType == ACT_ALLIN)
+        {
+            double aggressionScore = equity - (facingBet ? requiredEquity : PostFlopValueThreshold(ohStreet, false));
+            d.betRaiseEV = (float)((aggressionScore * potAfterCall) / 100.0);
+
+            WriteLog("[user.cpp] OH PostFlop Decision: %s. equity=%.4f required=%.4f callEV=$%.2f target=$%.2f pot=$%.2f call=$%.2f nhands=%.0f.\n",
+                ActionName(d.actionType),
+                equity,
+                requiredEquity,
+                callEV / 100.0,
+                d.byAmount / 100.0,
+                potBeforeCall / 100.0,
+                amountToCall / 100.0,
+                eq.nhands);
+
+            return d;
+        }
+    }
+
+    if (!facingBet)
+    {
+        d.actionType = ACT_CHECK;
+        d.byAmount = 0;
+
+        WriteLog("[user.cpp] OH PostFlop Decision: Check. equity=%.4f threshold=%.4f pot=$%.2f nhands=%.0f.\n",
+            equity,
+            PostFlopValueThreshold(ohStreet, false),
+            potBeforeCall / 100.0,
+            eq.nhands);
+
+        return d;
+    }
+
+    if (callEV >= 0.0)
+    {
+        d.actionType = ACT_CALL;
+        d.byAmount = amountToCall;
+
+        WriteLog("[user.cpp] OH PostFlop Decision: Call. equity=%.4f required=%.4f callEV=$%.2f call=$%.2f pot=$%.2f nhands=%.0f.\n",
+            equity, requiredEquity, callEV / 100.0, amountToCall / 100.0, potBeforeCall / 100.0, eq.nhands);
+    }
+    else
+    {
+        d.actionType = ACT_FOLD;
+        d.byAmount = amountToCall;
+
+        WriteLog("[user.cpp] OH PostFlop Decision: Fold. equity=%.4f required=%.4f callEV=$%.2f call=$%.2f pot=$%.2f nhands=%.0f.\n",
+            equity, requiredEquity, callEV / 100.0, amountToCall / 100.0, potBeforeCall / 100.0, eq.nhands);
+    }
+
+    return d;
 }
 
 static const char* FetchTableTitleForBridge() {
@@ -226,6 +1206,16 @@ static void SafeDealHoleCards(const char* c0, const char* c1) {
 // =============================================================================
 static bool Step_InitNewHand(int heroChair, int buttonChair, int bigBlindIn) {
     WriteLog("[user.cpp] ========================================\n");
+
+    if (heroChair < 0 || heroChair >= 10) {
+        WriteLog("[user.cpp] ERRO: userchair invalido (%d). Ignorando mao ate proximo estado valido.\n", heroChair);
+        return false;
+    }
+
+    if (buttonChair < 0 || buttonChair >= 10) {
+        WriteLog("[user.cpp] ERRO: dealerchair invalido (%d). Ignorando mao ate proximo estado valido.\n", buttonChair);
+        return false;
+    }
 
     memset(g_chairToLogical, -1, sizeof(g_chairToLogical));
     memset(g_isActive, 0, sizeof(g_isActive));
@@ -733,16 +1723,126 @@ static void InitializeBridge() {
     pDealHoleCards = (FN_DealHoleCards)GetProcAddress(hBridge, "G5Bridge_DealHoleCards");
     pNewAction = (FN_NewAction)GetProcAddress(hBridge, "G5Bridge_NewAction");
     pGoToNextStreet = (FN_GoToNextStreet)GetProcAddress(hBridge, "G5Bridge_GoToNextStreet");
-    pGetDecision = (FN_GetDecision)GetProcAddress(hBridge, "G5Bridge_GetDecision");
+pGetDecision = (FN_GetDecision)GetProcAddress(hBridge, "G5Bridge_GetDecision");
+pUpdateEnhancedPrWinProfile = (FN_UpdateEnhancedPrWinProfile)GetProcAddress(hBridge, "G5Bridge_UpdateEnhancedPrWinProfile");
+pSetOHEquitySnapshot = (FN_SetOHEquitySnapshot)GetProcAddress(hBridge, "G5Bridge_SetOHEquitySnapshot");
 
-    if (pNewHand && pDealHoleCards && pNewAction && pGoToNextStreet && pGetDecision) {
-        g_bridgeLoaded = true;
-        WriteLog("[user.cpp] G5Bridge carregada com sucesso.\n");
-    }
+if (pNewHand && pDealHoleCards && pNewAction && pGoToNextStreet && pGetDecision) {
+    g_bridgeLoaded = true;
+    WriteLog("[user.cpp] G5Bridge carregada com sucesso.\n");
+
+    if (pUpdateEnhancedPrWinProfile && pSetOHEquitySnapshot)
+        WriteLog("[user.cpp] EnhancedPrWin: exports do G5Bridge encontradas.\n");
+    else
+        WriteLog("[user.cpp] EnhancedPrWin: exports ainda nao encontradas; aguardando Fase 2 do G5Bridge.\n");
+}
     else {
         WriteLog("[user.cpp] ERRO: funções não encontradas na G5Bridge.dll.\n");
         FreeLibrary(hBridge); hBridge = NULL;
     }
+}
+
+// =============================================================================
+// PROCESS_MESSAGE DO OPENHOLDEM
+//
+// Esta é a interface nativa esperada pelo OpenHoldem para entregar:
+//   - state    -> estado raspado da mesa;
+//   - phl1k    -> versus-lists;
+//   - prw1326  -> estrutura Enhanced PrWin;
+//   - pfgws    -> ponteiro para consulta de símbolos;
+//   - query    -> consulta de dll$symbols.
+//
+// A Fase 2 depende de prw1326. Portanto, se esta função não for chamada pelo OH,
+// o pós-flop nunca usará ranges do G5 no Enhanced PrWin.
+// =============================================================================
+static void LogOpenHoldemMessageOnce(const char* message, bool& flag)
+{
+    if (flag)
+        return;
+
+    flag = true;
+    WriteLog("[user.cpp] process_message(%s) recebido do OpenHoldem.\n", message);
+}
+
+static double HandleOpenHoldemMessage(const char* message, const void* param)
+{
+    if (!message)
+        return 0.0;
+
+    if (strcmp(message, "load") == 0)
+    {
+        LogOpenHoldemMessageOnce("load", g_loggedMsgLoad);
+        return 0.0;
+    }
+
+    if (strcmp(message, "unload") == 0)
+    {
+        LogOpenHoldemMessageOnce("unload", g_loggedMsgUnload);
+        return 0.0;
+    }
+
+    if (strcmp(message, "state") == 0)
+    {
+        if (param)
+            g_lastOHStatePtr = param;
+
+        LogOpenHoldemMessageOnce("state", g_loggedMsgState);
+        return 0.0;
+    }
+
+    if (strcmp(message, "phl1k") == 0)
+    {
+        if (param)
+            g_phl1kPtr = param;
+
+        LogOpenHoldemMessageOnce("phl1k", g_loggedMsgPhl1k);
+        return 0.0;
+    }
+
+    if (strcmp(message, "pfgws") == 0)
+    {
+        if (param)
+            g_pfgws = (pfgws_t)param;
+
+        LogOpenHoldemMessageOnce("pfgws", g_loggedMsgPfgws);
+        return 0.0;
+    }
+
+    if (strcmp(message, "prw1326") == 0)
+    {
+        LogOpenHoldemMessageOnce("prw1326", g_loggedMsgPrw1326);
+
+        if (!param)
+        {
+            WriteLog("[user.cpp] EnhancedPrWin: process_message(prw1326) veio com param nulo.\n");
+            return 0.0;
+        }
+
+        InstallEnhancedPrWinPointer(param);
+        return 0.0;
+    }
+
+    if (strcmp(message, "query") == 0)
+    {
+        LogOpenHoldemMessageOnce("query", g_loggedMsgQuery);
+
+        if (!param)
+            return 0.0;
+
+        return ProcessQuery((const char*)param);
+    }
+
+    return 0.0;
+}
+
+extern "C" __declspec(dllexport) double process_message(const char* message, const void* param)
+{
+    return HandleOpenHoldemMessage(message, param);
+}
+
+extern "C" __declspec(dllexport) double process_query(const char* pquery)
+{
+    return ProcessQuery(pquery);
 }
 
 // =============================================================================
@@ -805,16 +1905,25 @@ DLL_IMPLEMENTS double __stdcall ProcessQuery(const char* pquery)
         }
     }
 
-    Step_AdvanceStreetIfNeeded(ohStreet);
-    bool heroJustRegistered = Step_TryRegisterHeroAction();
-    bool villainActed = Step_ProcessSegment(g_heroChair, ohStreet);
+Step_AdvanceStreetIfNeeded(ohStreet);
+bool heroJustRegistered = Step_TryRegisterHeroAction();
+bool villainActed = Step_ProcessSegment(g_heroChair, ohStreet);
 
-    if (g_heroActedThisStreet && !villainActed && !heroJustRegistered) {
-        WriteLog("[user.cpp] Cache: nenhuma ação nova -> retornando %.0f\n", g_cachedDecision);
-        return g_cachedDecision;
-    }
+if (g_heroActedThisStreet && !villainActed && !heroJustRegistered) {
+    WriteLog("[user.cpp] Cache: nenhuma acao nova -> retornando %.0f\n", g_cachedDecision);
+    return g_cachedDecision;
+}
 
-    DecisionResult decision = SafeGetDecision();
+DecisionResult decision = {};
+
+if (IsPostFlopStreet(ohStreet))
+{
+    decision = BuildPostFlopDecisionFromEnhancedPrWin(ohStreet);
+}
+else
+{
+    decision = SafeGetDecision();
+}
 
     std::string finalAction;
     double returnValue = 0.0;
@@ -877,9 +1986,18 @@ DLL_IMPLEMENTS double __stdcall ProcessQuery(const char* pquery)
     g_heroActedThisStreet = true;
     g_heroRegistered = false;
 
-    WriteLog("[user.cpp] G5 decidiu: %s (amount=$%.2f | ccEV=%.2f brEV=%.2f) -> %.0f\n",
+    const char* decisionOrigin = "G5 Preflop";
+
+    if (IsPostFlopStreet(ohStreet))
+        decisionOrigin = g_lastPostFlopDecisionUsedEnhancedPrWin
+            ? "OH EnhancedPrWin confirmado"
+            : "OH EnhancedPrWin nao confirmado";
+
+    WriteLog("[user.cpp] user.dll decidiu: %s (amount=$%.2f | ccEV=%.2f brEV=%.2f | origem=%s) -> %.0f\n",
         ActionName(decision.actionType), decision.byAmount / 100.0,
-        decision.checkCallEV, decision.betRaiseEV, returnValue);
+        decision.checkCallEV, decision.betRaiseEV,
+        decisionOrigin,
+        returnValue);
 
     if (finalAction == "Raise") {
         int bb = ReadCents("bblind");
