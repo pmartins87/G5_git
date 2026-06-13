@@ -109,6 +109,23 @@ static LONG ReadInterlockedLong(volatile LONG* value)
     return InterlockedCompareExchange(value, 0, 0);
 }
 
+static double GetOHActionSymbolSafe(const char* actionName, double fallback)
+{
+    if (!actionName || !actionName[0])
+        return fallback;
+
+    __try
+    {
+        return GetSymbol(actionName);
+    }
+    __except (1)
+    {
+        WriteLog("[user.cpp] ERRO: excecao ao resolver simbolo de acao OH '%s'. Usando fallback %.0f.\n",
+            actionName, fallback);
+        return fallback;
+    }
+}
+
 static bool g_loggedEnhancedPrWinNativeLayout = false;
 
 static void LogEnhancedPrWinNativeLayoutOnce()
@@ -812,6 +829,114 @@ static bool ShouldConvertPostFlopRaiseToAllIn(int raiseToTotal)
     return raiseToTotal * 100 >= heroTotal * 80;
 }
 
+static DecisionResult BuildPostFlopFallbackDecision(const char* reason, int amountToCall, int potBeforeCall)
+{
+    DecisionResult d = {};
+    d.actionType = ACT_CHECK;
+    d.byAmount = 0;
+    d.checkCallEV = 0.0f;
+    d.betRaiseEV = 0.0f;
+
+    bool facingBet = amountToCall > 0;
+
+    if (!facingBet)
+    {
+        WriteLog("[user.cpp] OH PostFlop Fallback: %s -> Check. Sem aposta para pagar e sem Enhanced confirmado.\n",
+            reason ? reason : "sem motivo informado");
+        return d;
+    }
+
+    OHEquityReadout eq = {};
+    ReadOHEquityReadout(eq);
+
+    double equity = 0.0;
+    bool hasEquity = TryComputeOHEquity01(eq, equity);
+
+    double potAfterCall = (double)potBeforeCall + (double)amountToCall;
+
+    if (potAfterCall <= 0.0)
+        potAfterCall = (double)amountToCall;
+
+    double requiredEquity = (potAfterCall > 0.0)
+        ? ((double)amountToCall / potAfterCall)
+        : 1.0;
+
+    if (hasEquity)
+    {
+        double callEV = (equity * potAfterCall) - (double)amountToCall;
+
+        d.byAmount = amountToCall;
+        d.checkCallEV = (float)(callEV / 100.0);
+        d.betRaiseEV = 0.0f;
+
+        if (callEV >= 0.0)
+        {
+            d.actionType = ACT_CALL;
+
+            WriteLog("[user.cpp] OH PostFlop Fallback: %s -> Call por equity OH atual. equity=%.4f required=%.4f callEV=$%.2f call=$%.2f pot=$%.2f nhands=%.0f.\n",
+                reason ? reason : "sem motivo informado",
+                equity,
+                requiredEquity,
+                callEV / 100.0,
+                amountToCall / 100.0,
+                potBeforeCall / 100.0,
+                eq.nhands);
+
+            return d;
+        }
+
+        d.actionType = ACT_FOLD;
+
+        WriteLog("[user.cpp] OH PostFlop Fallback: %s -> Fold por equity OH atual insuficiente. equity=%.4f required=%.4f callEV=$%.2f call=$%.2f pot=$%.2f nhands=%.0f.\n",
+            reason ? reason : "sem motivo informado",
+            equity,
+            requiredEquity,
+            callEV / 100.0,
+            amountToCall / 100.0,
+            potBeforeCall / 100.0,
+            eq.nhands);
+
+        return d;
+    }
+
+    int bb = ReadCentsSafe("bblind");
+
+    if (bb <= 0)
+        bb = 1;
+
+    int cheapCallLimit = (int)(potBeforeCall * 0.20 + 0.5);
+
+    if (cheapCallLimit < bb)
+        cheapCallLimit = bb;
+
+    if (amountToCall <= cheapCallLimit)
+    {
+        d.actionType = ACT_CALL;
+        d.byAmount = amountToCall;
+        d.checkCallEV = 0.0f;
+        d.betRaiseEV = 0.0f;
+
+        WriteLog("[user.cpp] OH PostFlop Fallback: %s -> Call conservador por bet pequena. call=$%.2f limite=$%.2f pot=$%.2f. Equity OH indisponivel.\n",
+            reason ? reason : "sem motivo informado",
+            amountToCall / 100.0,
+            cheapCallLimit / 100.0,
+            potBeforeCall / 100.0);
+
+        return d;
+    }
+
+    d.actionType = ACT_FOLD;
+    d.byAmount = amountToCall;
+
+    WriteLog("[user.cpp] OH PostFlop Fallback: %s -> Fold apenas porque nao havia Enhanced, equity OH valida, nem bet pequena. call=$%.2f limite=$%.2f pot=$%.2f.\n",
+        reason ? reason : "sem motivo informado",
+        amountToCall / 100.0,
+        cheapCallLimit / 100.0,
+        potBeforeCall / 100.0);
+
+    return d;
+}
+
 static DecisionResult BuildPostFlopDecisionFromEnhancedPrWin(int ohStreet)
 {
     DecisionResult d = {};
@@ -828,67 +953,28 @@ static DecisionResult BuildPostFlopDecisionFromEnhancedPrWin(int ohStreet)
 
     if (!EnsurePrw1326PointerAvailable())
     {
-        if (facingBet)
-        {
-            d.actionType = ACT_FOLD;
-            d.byAmount = amountToCall;
-
-            WriteLog("[user.cpp] OH PostFlop Decision: EnhancedPrWin sem ponteiro prw1326 -> Fold seguro. call=$%.2f pot=$%.2f.\n",
-                amountToCall / 100.0, potBeforeCall / 100.0);
-        }
-        else
-        {
-            d.actionType = ACT_CHECK;
-            d.byAmount = 0;
-
-            WriteLog("[user.cpp] OH PostFlop Decision: EnhancedPrWin sem ponteiro prw1326 e sem aposta para pagar -> Check seguro.\n");
-        }
-
-        return d;
+        return BuildPostFlopFallbackDecision(
+            "EnhancedPrWin sem ponteiro prw1326",
+            amountToCall,
+            potBeforeCall);
     }
 
     bool enhancedReady = UpdateEnhancedPrWinProfileFromBridge(ohStreet);
 
     if (!enhancedReady)
     {
-        if (facingBet)
-        {
-            d.actionType = ACT_FOLD;
-            d.byAmount = amountToCall;
-
-            WriteLog("[user.cpp] OH PostFlop Decision: perfil EnhancedPrWin nao atualizado -> Fold seguro. call=$%.2f pot=$%.2f.\n",
-                amountToCall / 100.0, potBeforeCall / 100.0);
-        }
-        else
-        {
-            d.actionType = ACT_CHECK;
-            d.byAmount = 0;
-
-            WriteLog("[user.cpp] OH PostFlop Decision: perfil EnhancedPrWin nao atualizado e sem aposta para pagar -> Check seguro.\n");
-        }
-
-        return d;
+        return BuildPostFlopFallbackDecision(
+            "perfil EnhancedPrWin nao atualizado",
+            amountToCall,
+            potBeforeCall);
     }
 
     if (!ForceOpenHoldemPrWinRecalculation(ohStreet))
     {
-        if (facingBet)
-        {
-            d.actionType = ACT_FOLD;
-            d.byAmount = amountToCall;
-
-            WriteLog("[user.cpp] OH PostFlop Decision: EnhancedPrWin nao confirmou recalc/callback -> Fold seguro. call=$%.2f pot=$%.2f.\n",
-                amountToCall / 100.0, potBeforeCall / 100.0);
-        }
-        else
-        {
-            d.actionType = ACT_CHECK;
-            d.byAmount = 0;
-
-            WriteLog("[user.cpp] OH PostFlop Decision: EnhancedPrWin nao confirmou recalc/callback e sem aposta para pagar -> Check seguro.\n");
-        }
-
-        return d;
+        return BuildPostFlopFallbackDecision(
+            "EnhancedPrWin nao confirmou recalc/callback",
+            amountToCall,
+            potBeforeCall);
     }
 
     OHEquityReadout eq = {};
@@ -904,70 +990,34 @@ static DecisionResult BuildPostFlopDecisionFromEnhancedPrWin(int ohStreet)
         LONG callbackVersion = ReadInterlockedLong(&g_enhancedPrWinLastCallbackVersion);
         LONG callbackCount = ReadInterlockedLong(&g_enhancedPrWinCallbackCount);
 
-        if (facingBet)
-        {
-            d.actionType = ACT_FOLD;
-            d.byAmount = amountToCall;
+        char reason[256];
+        sprintf_s(reason, sizeof(reason),
+            "perfil EnhancedPrWin atualizado, mas callback ainda nao executou para a versao atual: perfil=%ld callback=%ld totalCallbacks=%ld",
+            profileVersion, callbackVersion, callbackCount);
 
-            WriteLog("[user.cpp] OH PostFlop Decision: perfil EnhancedPrWin atualizado, mas callback ainda nao executou para a versao atual -> Fold seguro. perfil=%ld callback=%ld totalCallbacks=%ld.\n",
-                profileVersion, callbackVersion, callbackCount);
-        }
-        else
-        {
-            d.actionType = ACT_CHECK;
-            d.byAmount = 0;
-
-            WriteLog("[user.cpp] OH PostFlop Decision: perfil EnhancedPrWin atualizado, mas callback ainda nao executou para a versao atual -> Check seguro. perfil=%ld callback=%ld totalCallbacks=%ld.\n",
-                profileVersion, callbackVersion, callbackCount);
-        }
-
-        return d;
+        return BuildPostFlopFallbackDecision(reason, amountToCall, potBeforeCall);
     }
 
     double equity = 0.0;
 
     if (!TryComputeOHEquity01(eq, equity))
     {
-        if (facingBet)
-        {
-            d.actionType = ACT_FOLD;
-            d.byAmount = amountToCall;
+        char reason[256];
+        sprintf_s(reason, sizeof(reason),
+            "equity OH invalida: prwin=%.4f prtie=%.4f prlos=%.4f nhands=%.0f",
+            eq.prwin, eq.prtie, eq.prlos, eq.nhands);
 
-            WriteLog("[user.cpp] OH PostFlop Decision: equity OH invalida -> Fold seguro. prwin=%.4f prtie=%.4f prlos=%.4f nhands=%.0f.\n",
-                eq.prwin, eq.prtie, eq.prlos, eq.nhands);
-        }
-        else
-        {
-            d.actionType = ACT_CHECK;
-            d.byAmount = 0;
-
-            WriteLog("[user.cpp] OH PostFlop Decision: equity OH invalida e sem aposta para pagar -> Check seguro. prwin=%.4f prtie=%.4f prlos=%.4f nhands=%.0f.\n",
-                eq.prwin, eq.prtie, eq.prlos, eq.nhands);
-        }
-
-        return d;
+        return BuildPostFlopFallbackDecision(reason, amountToCall, potBeforeCall);
     }
 
     if (eq.nhands > 0.0 && eq.nhands < 100.0)
     {
-        if (facingBet)
-        {
-            d.actionType = ACT_FOLD;
-            d.byAmount = amountToCall;
+        char reason[256];
+        sprintf_s(reason, sizeof(reason),
+            "nhands insuficiente para decisao Enhanced robusta: nhands=%.0f",
+            eq.nhands);
 
-            WriteLog("[user.cpp] OH PostFlop Decision: nhands insuficiente para decisao robusta -> Fold seguro. nhands=%.0f.\n",
-                eq.nhands);
-        }
-        else
-        {
-            d.actionType = ACT_CHECK;
-            d.byAmount = 0;
-
-            WriteLog("[user.cpp] OH PostFlop Decision: nhands insuficiente para bet robusto -> Check. nhands=%.0f.\n",
-                eq.nhands);
-        }
-
-        return d;
+        return BuildPostFlopFallbackDecision(reason, amountToCall, potBeforeCall);
     }
 
     double potAfterCall = (double)potBeforeCall + (double)amountToCall;
@@ -1567,7 +1617,7 @@ static void Step_ResolveEndOfPrevStreet(int oldStreet, int savedMaxBet)
                 g_lastPlayerBets[c] = savedMaxBet;
                 LogAction("Call(pendente)", c, g_chairToLogical[c], (int)act, callAmount);
             }
-            else if (lastBet >= savedMaxBet && !g_hasCheckedThisStreet[c])
+            else if (savedMaxBet <= 0 && lastBet >= savedMaxBet && !g_hasCheckedThisStreet[c])
             {
                 SafeNewAction(g_chairToLogical[c], ACT_CHECK, 0);
                 g_hasCheckedThisStreet[c] = true;
@@ -1980,7 +2030,12 @@ else
     default:        finalAction = "Fold";   returnValue = 0.0; break;
     }
 
-    g_cachedDecision = returnValue;
+    double actualReturnValue = returnValue;
+
+    if (finalAction != "Raise")
+        actualReturnValue = GetOHActionSymbolSafe(finalAction.c_str(), returnValue);
+
+    g_cachedDecision = actualReturnValue;
     g_cachedActionType = decision.actionType;
     g_cachedByAmount = decision.byAmount;
     g_heroActedThisStreet = true;
@@ -1997,14 +2052,14 @@ else
         ActionName(decision.actionType), decision.byAmount / 100.0,
         decision.checkCallEV, decision.betRaiseEV,
         decisionOrigin,
-        returnValue);
+        actualReturnValue);
 
     if (finalAction == "Raise") {
         int bb = ReadCents("bblind");
 
         if (bb <= 0) {
             WriteLog("[user.cpp] ERRO: bblind invalido (%d). Bloqueando Raise e retornando Call.\n", bb);
-            g_cachedDecision = GetSymbol("Call");
+            g_cachedDecision = GetOHActionSymbolSafe("Call", 2.0);
             return g_cachedDecision;
         }
 
@@ -2013,21 +2068,21 @@ else
 
         if (raiseToTotal <= 0) {
             WriteLog("[user.cpp] ERRO: raiseToTotal invalido (%d). Bloqueando Raise e retornando Call.\n", raiseToTotal);
-            g_cachedDecision = GetSymbol("Call");
+            g_cachedDecision = GetOHActionSymbolSafe("Call", 2.0);
             return g_cachedDecision;
         }
 
-        returnValue = (double)raiseToTotal / (double)bb;
+        actualReturnValue = (double)raiseToTotal / (double)bb;
 
         WriteLog("[user.cpp] Raise: byAmount=$%.2f + heroInPot=$%.2f = RaiseTo=$%.2f (%.2f BBs)\n",
             decision.byAmount / 100.0, heroMoneyInPot / 100.0,
-            raiseToTotal / 100.0, returnValue);
+            raiseToTotal / 100.0, actualReturnValue);
 
-        g_cachedDecision = returnValue;
-        return returnValue;
+        g_cachedDecision = actualReturnValue;
+        return actualReturnValue;
     }
 
-    return GetSymbol(finalAction.c_str());
+    return actualReturnValue;
 }
 
 // =============================================================================

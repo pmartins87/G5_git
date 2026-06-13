@@ -11,6 +11,11 @@ namespace G5.Logic
     {
         public const int N_HOLECARDS = 52 * 51 / 2;
 
+        // Opcional. Por padrao fica false para nao poluir os logs.
+        // Quando true, os diagnosticos mostram todos os combos ativos do range,
+        // nao apenas o top.
+        public static bool mostrarRangesCompletos = true;
+
         /// <summary>
         /// Struktura koja pamti Hole-Cards index i equity koji im je pridruzen.
         /// </summary>
@@ -174,12 +179,17 @@ public string TopCombosSummary(int topN = 8, float minEquity = 0.0000001f)
     return result;
 }
 
-public string CuttingParamsSummary(int maxItems = 12)
+public string CuttingParamsSummary(int maxItems = 12, bool mostrarCortesCompletos = false)
 {
     if (CuttingParams == null || CuttingParams.Count == 0)
         return "sem cortes";
 
-    int start = Math.Max(0, CuttingParams.Count - maxItems);
+    bool full = mostrarCortesCompletos || mostrarRangesCompletos;
+    int start = 0;
+
+    if (!full && maxItems > 0)
+        start = Math.Max(0, CuttingParams.Count - maxItems);
+
     StringBuilder sb = new StringBuilder();
 
     for (int i = start; i < CuttingParams.Count; i++)
@@ -204,15 +214,36 @@ public string CuttingParamsSummary(int maxItems = 12)
         sb.Append(")");
     }
 
-    if (CuttingParams.Count > maxItems)
+    if (!full && maxItems > 0 && CuttingParams.Count > maxItems)
         return $"... {sb}";
 
     return sb.ToString();
 }
 
-public string DiagnosticSummary(int topN = 8)
+public string FullCombosSummary(float minEquity = 0.0000001f)
 {
-    return $"combos={ActiveComboCount()}, mass={ProbabilityMass():F4}, top=[{TopCombosSummary(topN)}], cortes=[{CuttingParamsSummary()}]";
+    var combos = Data
+        .Where(x => x.Equity > minEquity)
+        .OrderByDescending(x => x.Equity)
+        .Select(x => x.GetHoleCards().ToString() + ":" + (x.Equity * 100.0f).ToString("F4") + "%");
+
+    string result = string.Join(", ", combos);
+
+    if (string.IsNullOrWhiteSpace(result))
+        return "-";
+
+    return result;
+}
+
+public string DiagnosticSummary(int topN = 8, bool mostrarRangeCompleto = false)
+{
+    bool full = mostrarRangeCompleto || mostrarRangesCompletos;
+
+    string combosText = full
+        ? $"rangeCompleto=[{FullCombosSummary()}]"
+        : $"top=[{TopCombosSummary(topN)}]";
+
+    return $"combos={ActiveComboCount()}, mass={ProbabilityMass():F4}, {combosText}, cortes=[{CuttingParamsSummary(12, full)}]";
 }
 
         public void BanCards(List<Card> cards, bool isBoard)

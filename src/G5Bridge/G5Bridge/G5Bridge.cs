@@ -71,6 +71,11 @@ private static bool _handSyncFailed = false;
         // =========================================================================
         public static bool EnableDiagnosticLogs { get; private set; } = false;
 
+        // Opcional. Por padrao fica false para manter log limpo.
+        // Para ver todos os combos ativos dos ranges, mude para true no codigo
+        // ou use a variavel de ambiente G5BRIDGE_MOSTRAR_RANGES_COMPLETOS=1.
+        private static bool mostrarRangesCompletos = false;
+
         private static bool IsDiagnosticLogEnabled()
         {
             if (EnableDiagnosticLogs)
@@ -98,6 +103,37 @@ private static bool _handSyncFailed = false;
         {
             if (IsDiagnosticLogEnabled())
                 Log(message);
+        }
+
+        private static bool MostrarRangesCompletos()
+        {
+            if (mostrarRangesCompletos)
+                return true;
+
+            try
+            {
+                string env = Environment.GetEnvironmentVariable("G5BRIDGE_MOSTRAR_RANGES_COMPLETOS") ?? "";
+
+                if (env == "1" ||
+                    env.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+                    env.Equals("on", StringComparison.OrdinalIgnoreCase) ||
+                    env.Equals("yes", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static string GetOpponentRangesDiagnosticsForLog()
+        {
+            if (_gameState == null)
+                return "sem gameState";
+
+            bool full = MostrarRangesCompletos();
+            return _gameState.getOpponentRangesDiagnostics(full, full ? 1326 : 5);
         }
 
         private static void ConfigureNativeDllPath()
@@ -611,17 +647,43 @@ private static bool _handSyncFailed = false;
 
         private static bool IsBridgeReadyForEnhancedPrWin()
         {
-            if (_gameState == null)
-                return false;
+            string reason;
+            return IsBridgeReadyForEnhancedPrWin(out reason);
+        }
 
-            if (_handSyncFailed || _streetSyncFailed)
+        private static bool IsBridgeReadyForEnhancedPrWin(out string reason)
+        {
+            reason = "";
+
+            if (_gameState == null)
+            {
+                reason = "_gameState == null";
                 return false;
+            }
+
+            if (_handSyncFailed)
+            {
+                reason = "_handSyncFailed == true";
+                return false;
+            }
+
+            if (_streetSyncFailed)
+            {
+                reason = "_streetSyncFailed == true";
+                return false;
+            }
 
             if (_gameState.getStreet() == Street.PreFlop)
+            {
+                reason = "G5 ainda esta em PreFlop";
                 return false;
+            }
 
             if (CurrentChairs == null)
+            {
+                reason = "CurrentChairs == null";
                 return false;
+            }
 
             return true;
         }
@@ -646,13 +708,24 @@ private static bool _handSyncFailed = false;
             _lastEnhancedPrWinStreet = 0;
 
             if (prw1326Ptr == IntPtr.Zero)
+            {
+                Log("[EnhancedPrWin] perfil nao atualizado: prw1326Ptr == IntPtr.Zero.");
                 return 0;
+            }
 
             if (currentStreet < 2 || currentStreet > 4)
+            {
+                Log($"[EnhancedPrWin] perfil nao atualizado: currentStreet invalida: {currentStreet}.");
                 return 0;
+            }
 
-            if (!IsBridgeReadyForEnhancedPrWin())
+            string readinessReason;
+
+            if (!IsBridgeReadyForEnhancedPrWin(out readinessReason))
+            {
+                Log($"[EnhancedPrWin] perfil nao atualizado: Bridge nao pronta: {readinessReason}.");
                 return 0;
+            }
 			
 			            if (!ConfigurePrwLayout(
                 rootUseMeOffset,
@@ -708,7 +781,10 @@ private static bool _handSyncFailed = false;
                 }
 
                 if (updatedOpponents <= 0)
+                {
+                    Log($"[EnhancedPrWin] perfil nao atualizado: nenhum oponente ativo com range valido. streetOH={currentStreet}, streetG5={_gameState.getStreet()}, players={players.Count}.");
                     return 0;
+                }
 
                 _lastEnhancedPrWinStreet = currentStreet;
 
@@ -978,7 +1054,7 @@ try
 {
     _gameState.dealHoleCards(new Card(c0), new Card(c1));
     Log("[DealHoleCards] OK.");
-    Log($"[Ranges] apos DealHoleCards: {_gameState.getOpponentRangesDiagnostics(false, 5)}");
+    Log($"[Ranges] apos DealHoleCards: {GetOpponentRangesDiagnosticsForLog()}");
 }
 catch (Exception ex) { Log($"[DealHoleCards] ERRO: {ex.Message}"); }
         }
@@ -1035,7 +1111,7 @@ private static void InternalNewAction(int playerLogIdx, int actionType, int byAm
 _gameState.playerActs((ActionType)actionType, byAmount);
 Log($"[{src}] OK - {GetActionName(actionType)} by {byAmount}. " +
     $"Proximo={GetPositionName(_gameState.getPlayerToActInd(), _buttonIndex, _numPlayers)}");
-Log($"[Ranges] apos {src} {GetActionName(actionType)} by {byAmount}: {_gameState.getOpponentRangesDiagnostics(false, 5)}");
+Log($"[Ranges] apos {src} {GetActionName(actionType)} by {byAmount}: {GetOpponentRangesDiagnosticsForLog()}");
     }
     catch (Exception ex)
     {
@@ -1150,7 +1226,7 @@ if (_streetSyncFailed)
 
 _gameState.goToNextStreet(new List<Card> { f0, f1, f2 });
 Log($"[{src}] Flop: {c0} {c1} {c2}");
-Log($"[Ranges] apos Flop: {_gameState.getOpponentRangesDiagnostics(false, 5)}");
+Log($"[Ranges] apos Flop: {GetOpponentRangesDiagnosticsForLog()}");
                 }
                 else if (n == 1)
                 {
@@ -1177,7 +1253,7 @@ Log($"[Ranges] apos Flop: {_gameState.getOpponentRangesDiagnostics(false, 5)}");
 
 _gameState.goToNextStreet(card);
 Log($"[{src}] {_gameState.getStreet()}: {c0}");
-Log($"[Ranges] apos {_gameState.getStreet()}: {_gameState.getOpponentRangesDiagnostics(false, 5)}");
+Log($"[Ranges] apos {_gameState.getStreet()}: {GetOpponentRangesDiagnosticsForLog()}");
                 }
                 else
                 {

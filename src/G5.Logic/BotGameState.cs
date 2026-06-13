@@ -514,16 +514,53 @@ public string getPreFlopChartsInfo()
 
         public int getRaiseAmount()
         {
-            int amountToCall = getMaxMoneyInThePot() - getPlayerToAct().MoneyInPot;
+            int heroInPot = getPlayerToAct().MoneyInPot;
+            int heroStack = getPlayerToAct().Stack;
+            int maxInPot = getMaxMoneyInThePot();
+            int amountToCall = maxInPot - heroInPot;
+
+            if (amountToCall < 0)
+                amountToCall = 0;
+
+            if (heroStack <= 0)
+                return 0;
+
+            if (amountToCall > heroStack)
+                amountToCall = heroStack;
 
             if (_street == Street.PreFlop)
             {
-                return potSize() + 2 * amountToCall;
+                if (_bigBlingSize <= 0)
+                    return amountToCall;
+
+                int targetTotal;
+
+                if (_numBets <= 0)
+                {
+                    int callers = _numCallers;
+
+                    if (callers < 0)
+                        callers = 0;
+
+                    targetTotal = (3 + callers) * _bigBlingSize;
+                }
+                else
+                {
+                    targetTotal = 3 * maxInPot;
+                }
+
+                int amountToAdd = targetTotal - heroInPot;
+
+                if (amountToAdd < amountToCall)
+                    amountToAdd = amountToCall;
+
+                if (amountToAdd > heroStack)
+                    amountToAdd = heroStack;
+
+                return amountToAdd;
             }
-            else
-            {
-                return (RAISE_SIZE_NOM * (potSize() + amountToCall)) / RAISE_SIZE_DEN + amountToCall;
-            }
+
+            return (RAISE_SIZE_NOM * (potSize() + amountToCall)) / RAISE_SIZE_DEN + amountToCall;
         }
 
         public int getAmountToCall()
@@ -1665,7 +1702,7 @@ private BotDecision calculateHeroFlopHeuristicAction(int amountToCall, int nOfOp
             return $"{flushTexture}, {pairTexture}, {straightTexture}, wetness={wetness:F2}";
         }
 
-public string getOpponentRangesDiagnostics(bool includeFolded = false, int topN = 5)
+public string getOpponentRangesDiagnostics(bool mostrarRangesCompletos = false, int topN = 5)
 {
     StringBuilder sb = new StringBuilder();
 
@@ -1676,7 +1713,7 @@ public string getOpponentRangesDiagnostics(bool includeFolded = false, int topN 
 
         var player = _players[i];
 
-        if (!includeFolded && player.StatusInHand == Status.Folded)
+        if (player.StatusInHand == Status.Folded)
             continue;
 
         if (sb.Length > 0)
@@ -1686,7 +1723,7 @@ public string getOpponentRangesDiagnostics(bool includeFolded = false, int topN 
         sb.Append($"status={player.StatusInHand}, ");
         sb.Append($"stack={fmtPts(player.Stack)}, ");
         sb.Append($"inPot={fmtPts(player.MoneyInPot)}, ");
-        sb.Append(player.Range.DiagnosticSummary(topN));
+        sb.Append(player.Range.DiagnosticSummary(topN, mostrarRangesCompletos));
     }
 
     if (sb.Length == 0)

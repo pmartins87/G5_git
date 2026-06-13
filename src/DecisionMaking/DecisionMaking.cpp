@@ -357,8 +357,55 @@ namespace G5Cpp
         {
             int pot = DMDebugPotSize(prms);
 
+            if (prms.playerToActInd < 0 || prms.playerToActInd >= (int)prms._players.size())
+                return 0;
+
+            const Player& player = prms._players[prms.playerToActInd];
+
+            int heroInPot = player.moneyInPot();
+            int heroStack = player.stack();
+            int maxInPot = DMDebugMaxMoneyInThePot(prms);
+
+            if (amountToCall < 0)
+                amountToCall = 0;
+
+            if (heroStack <= 0)
+                return 0;
+
+            if (amountToCall > heroStack)
+                amountToCall = heroStack;
+
             if (prms.street == Street_PreFlop)
-                return pot + 2 * amountToCall;
+            {
+                if (prms.bigBlindSize <= 0)
+                    return amountToCall;
+
+                int targetTotal = 0;
+
+                if (prms.numBets <= 0)
+                {
+                    int callers = prms.numCallers;
+
+                    if (callers < 0)
+                        callers = 0;
+
+                    targetTotal = (3 + callers) * prms.bigBlindSize;
+                }
+                else
+                {
+                    targetTotal = 3 * maxInPot;
+                }
+
+                int amountToAdd = targetTotal - heroInPot;
+
+                if (amountToAdd < amountToCall)
+                    amountToAdd = amountToCall;
+
+                if (amountToAdd > heroStack)
+                    amountToAdd = heroStack;
+
+                return amountToAdd;
+            }
 
             return (2 * (pot + amountToCall)) / 3 + amountToCall;
         }

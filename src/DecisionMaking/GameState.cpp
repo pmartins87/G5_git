@@ -87,16 +87,53 @@ namespace G5Cpp
 
     int GameState::getRaiseAmount() const
     {
-        int amountToCall = maxMoneyInThePot() - playerToAct().moneyInPot();
+        int heroInPot = playerToAct().moneyInPot();
+        int heroStack = playerToAct().stack();
+        int maxInPot = maxMoneyInThePot();
+        int amountToCall = maxInPot - heroInPot;
+
+        if (amountToCall < 0)
+            amountToCall = 0;
+
+        if (heroStack <= 0)
+            return 0;
+
+        if (amountToCall > heroStack)
+            amountToCall = heroStack;
 
         if (street == Street_PreFlop)
         {
-            return potSize() + 2 * amountToCall;
+            if (bigBlindSize <= 0)
+                return amountToCall;
+
+            int targetTotal = 0;
+
+            if (numBets <= 0)
+            {
+                int callers = numCallers;
+
+                if (callers < 0)
+                    callers = 0;
+
+                targetTotal = (3 + callers) * bigBlindSize;
+            }
+            else
+            {
+                targetTotal = 3 * maxInPot;
+            }
+
+            int amountToAdd = targetTotal - heroInPot;
+
+            if (amountToAdd < amountToCall)
+                amountToAdd = amountToCall;
+
+            if (amountToAdd > heroStack)
+                amountToAdd = heroStack;
+
+            return amountToAdd;
         }
-        else
-        {
-            return (RAISE_SIZE_NOM * (potSize() + amountToCall)) / RAISE_SIZE_DEN + amountToCall;
-        }
+
+        return (RAISE_SIZE_NOM * (potSize() + amountToCall)) / RAISE_SIZE_DEN + amountToCall;
     }
 
     int GameState::normalizeBetRaiseAmount(int requestedAmount) const
