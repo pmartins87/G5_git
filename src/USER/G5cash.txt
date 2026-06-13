@@ -1,4 +1,4 @@
-a//************************************************************************************************************************************** 	
+//************************************************************************************************************************************** 	
 //                                                       
 //                                                      #00 - NOTES
 //
@@ -33,6 +33,50 @@ me_st_didactionthismatch_1
 me_st_didactionthismatch_1
 
 	
+
+//=============================================================================//
+// G5 Runtime Config
+// Estas funcoes sao lidas pela user.dll e enviadas para a G5Bridge.
+// Alterar aqui nao exige recompilar DLL.
+//=============================================================================//
+
+##f$G5_LogCompleto##
+// 1 = ativa logs diagnosticos completos da bridge.
+// 0 = logs normais/resumidos para melhor performance.
+When Others Return 0 Force
+
+##f$G5_LogRangesCompletos##
+// 1 = mostra ranges completos dos adversarios e cortes completos.
+// 0 = nao imprime ranges no log normal; ranges ficam apenas no diagnostico.
+When Others Return 0 Force
+
+##f$G5_FastPostFlopEV##
+// 1 = usa FastEV pos-flop: OH EnhancedPrWin fornece equity e G5 calcula EV leve.
+// 0 = desativa FastEV e deixa a user.dll usar o fallback local pos-flop.
+When Others Return 1 Force
+
+##f$G5_AllInPorCommitment##
+// 1 = converte bet/raise em all-in quando o valor a colocar compromete
+//     pelo menos f$G5_AllInCommitmentPercent do balance restante.
+// 0 = nao faz conversao automatica por commitment.
+When Others Return 1 Force
+
+##f$G5_AllInCommitmentPercent##
+// Percentual do balance restante usado para converter bet/raise em all-in.
+// Exemplo: balance=100, aposta adicional=70, threshold=66 => all-in.
+When Others Return 66 Force
+
+##f$G5_FastEV_AllInCandidatoSPRAlto##
+// 1 = permite que all-in entre como candidato normal do FastEV mesmo em SPR alto.
+// 0 = all-in so entra como candidato se o SPR estiver baixo; ainda pode haver
+//     conversao para all-in por commitment acima.
+When Others Return 0 Force
+
+##f$G5_FastEV_MaxSPRParaAllInCandidato##
+// Com f$G5_FastEV_AllInCandidatoSPRAlto=0, all-in so entra como candidato
+// natural quando SPR <= este valor. A conversao por commitment continua separada.
+When Others Return 1.25 Force
+
 //=============================================================================//
 // Enhanced PrWin / PrWin config
 // Uso estritamente academico/offline em ambiente controlado.

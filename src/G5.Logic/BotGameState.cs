@@ -15,7 +15,11 @@ namespace G5.Logic
     {
         private const int RAISE_SIZE_NOM = 2;
         private const int RAISE_SIZE_DEN = 3;
-        private const int ALL_IN_COMMITMENT_PERCENT = 66;
+        private static bool _fastPostFlopEVEnabled = true;
+        private static bool _allowAllInByCommitment = true;
+        private static int _allInCommitmentPercent = 66;
+        private static bool _allowHighSprAllInCandidate = false;
+        private static float _maxSprForAllInCandidate = 1.25f;
 
         private int _bigBlingSize;
         private PokerClient _pokerClient;
@@ -72,6 +76,52 @@ private string _preFlopChartsPath = "";
 private string _preFlopChartsBucket = "";
 private int _preFlopChartsEffectiveStackBb = 0;
 private int _preFlopChartsLoadedCount = 0;
+
+private static readonly ConcurrentDictionary<string, PreFlopCharts> _preFlopChartsCache =
+    new ConcurrentDictionary<string, PreFlopCharts>(StringComparer.OrdinalIgnoreCase);
+
+private static PreFlopCharts GetCachedPreFlopCharts(string path)
+{
+    if (string.IsNullOrWhiteSpace(path))
+        throw new ArgumentException("BotGameState: path vazio para cache de charts preflop.");
+
+    string fullPath = Path.GetFullPath(path);
+
+    return _preFlopChartsCache.GetOrAdd(fullPath, p => new PreFlopCharts(p));
+}
+
+public static void ConfigureRuntimeOptions(
+    bool fastPostFlopEVEnabled,
+    bool allowAllInByCommitment,
+    int allInCommitmentPercent,
+    bool allowHighSprAllInCandidate,
+    double maxSprForAllInCandidate)
+{
+    _fastPostFlopEVEnabled = fastPostFlopEVEnabled;
+    _allowAllInByCommitment = allowAllInByCommitment;
+
+    if (allInCommitmentPercent < 1)
+        allInCommitmentPercent = 1;
+
+    if (allInCommitmentPercent > 100)
+        allInCommitmentPercent = 100;
+
+    _allInCommitmentPercent = allInCommitmentPercent;
+    _allowHighSprAllInCandidate = allowHighSprAllInCandidate;
+
+    if (double.IsNaN(maxSprForAllInCandidate) || double.IsInfinity(maxSprForAllInCandidate) || maxSprForAllInCandidate <= 0.0)
+        maxSprForAllInCandidate = 1.25;
+
+    if (maxSprForAllInCandidate > 20.0)
+        maxSprForAllInCandidate = 20.0;
+
+    _maxSprForAllInCandidate = (float)maxSprForAllInCandidate;
+}
+
+public static bool IsFastPostFlopEVEnabled()
+{
+    return _fastPostFlopEVEnabled;
+}
 
 private static int CalculatePreFlopChartEffectiveStackBb(int[] stackSizes, int heroIndex, int bigBlindSize)
 {
@@ -195,7 +245,7 @@ public string getPreFlopChartsInfo()
 
             _preFlopChartsEffectiveStackBb = CalculatePreFlopChartEffectiveStackBb(stackSizes, heroIndex, bigBlingSize);
             _preFlopChartsPath = SelectPreFlopChartsFolder(assemblyFolder, _preFlopChartsEffectiveStackBb, out _preFlopChartsBucket);
-            _preFlopCharts = new PreFlopCharts(_preFlopChartsPath);
+            _preFlopCharts = GetCachedPreFlopCharts(_preFlopChartsPath);
             _preFlopChartsLoadedCount = _preFlopCharts.LoadedCount;
 
             _tableType = tableType;
@@ -1050,10 +1100,13 @@ public string getPreFlopChartsInfo()
 
         private static bool IsAtLeastAllInCommitmentThreshold(int intendedAmount, int stack)
         {
+            if (!_allowAllInByCommitment)
+                return false;
+
             if (stack <= 0 || intendedAmount <= 0)
                 return false;
 
-            return intendedAmount * 100 >= stack * ALL_IN_COMMITMENT_PERCENT;
+            return intendedAmount * 100 >= stack * _allInCommitmentPercent;
         }
 
         public static bool ShouldConvertToAllInByCommitmentForRegression(int intendedAmount, int stack)
@@ -1257,6 +1310,30 @@ public string getPreFlopChartsInfo()
             return true;
         }
 
+        private bool shouldIncludeFastPostFlopAllInCandidate(int pot, int amountToCall, int stack)
+        {
+            if (stack <= 0)
+                return false;
+
+            if (_allowHighSprAllInCandidate)
+                return true;
+
+            int effectivePot = Math.Max(1, pot + amountToCall);
+            float spr = stack / (float)effectivePot;
+
+            // O FastEV é uma aproximação de uma street. Jam só entra como candidato
+            // natural quando o SPR já está baixo, ou quando o call já compromete o
+            // balance restante. Em SPR alto, all-in exige árvore futura/ranges de
+            // call muito mais precisos e não deve competir como size comum.
+            if (spr <= _maxSprForAllInCandidate)
+                return true;
+
+            if (amountToCall > 0 && IsAtLeastAllInCommitmentThreshold(amountToCall, stack))
+                return true;
+
+            return false;
+        }
+
         private List<int> buildPostFlopBetRaiseCandidates()
         {
             List<int> candidates = new List<int>();
@@ -1269,8 +1346,9 @@ public string getPreFlopChartsInfo()
             int stack = getHero().Stack;
             int basePot = Math.Max(1, pot + amountToCall);
             int minBet = Math.Max(1, _bigBlingSize);
+            bool allowAllInCandidate = shouldIncludeFastPostFlopAllInCandidate(pot, amountToCall, stack);
 
-            Action<int> addCandidate = (amount) =>
+            Action<int, bool> addCandidate = (amount, allowAllIn) =>
             {
                 if (stack <= 0)
                     return;
@@ -1281,8 +1359,13 @@ public string getPreFlopChartsInfo()
                 if (amountToCall == 0 && amount < minBet)
                     amount = minBet;
 
-                if (amount > stack)
+                if (amount >= stack)
+                {
+                    if (!allowAllIn)
+                        return;
+
                     amount = stack;
+                }
 
                 if (amount <= 0)
                     return;
@@ -1293,37 +1376,528 @@ public string getPreFlopChartsInfo()
 
             if (amountToCall > 0)
             {
-                // Facing a bet: testar apenas raise 50% do pote ajustado ou all-in.
-                addCandidate(amountToCall + (int)Math.Round(basePot * 0.50f));
-                addCandidate(stack);
+                addCandidate(amountToCall + (int)Math.Round(basePot * 0.50f), false);
+                addCandidate(amountToCall + (int)Math.Round(basePot * 0.75f), false);
+                addCandidate(amountToCall + (int)Math.Round(basePot * 1.00f), false);
+
+                if (allowAllInCandidate)
+                    addCandidate(stack, true);
             }
             else
             {
-                float[] fractions;
-
-                if (_street == Street.Flop)
-                {
-                    // Sem aposta no flop: bet 33%, bet 50% ou all-in.
-                    fractions = new float[] { 0.33f, 0.50f };
-                }
-                else
-                {
-                    // Sem aposta no turn/river: bet 33%, 50%, 75%, 100% ou all-in.
-                    fractions = new float[] { 0.33f, 0.50f, 0.75f, 1.00f };
-                }
+                float[] fractions = new float[] { 0.33f, 0.50f, 0.66f, 0.75f, 1.00f };
 
                 foreach (float fraction in fractions)
                 {
                     int amount = (int)Math.Round(basePot * fraction);
-                    addCandidate(amount);
+                    addCandidate(amount, false);
                 }
 
-                addCandidate(stack);
+                if (allowAllInCandidate)
+                    addCandidate(stack, true);
             }
 
             candidates.Sort();
             return candidates;
         }
+
+        private struct FastOpponentResponse
+        {
+            public string Name;
+            public int CallAmount;
+            public float FoldProb;
+            public float CallProb;
+            public float RaiseProb;
+            public float ContinueStrength;
+            public float RequiredEquity;
+
+            public override string ToString()
+            {
+                return $"{Name}: fold={FoldProb:P1}, call={CallProb:P1}, raise={RaiseProb:P1}, callAmt={CallAmount}, req={RequiredEquity:P1}, contStrength={ContinueStrength:F2}";
+            }
+        }
+
+        private static float ClampFloat(float value, float min, float max)
+        {
+            if (float.IsNaN(value) || float.IsInfinity(value))
+                return min;
+
+            if (value < min)
+                return min;
+
+            if (value > max)
+                return max;
+
+            return value;
+        }
+
+        private static float Clamp01(float value)
+        {
+            return ClampFloat(value, 0.0f, 1.0f);
+        }
+
+        private static float FastSigmoid(float x)
+        {
+            if (x > 20.0f)
+                return 1.0f;
+
+            if (x < -20.0f)
+                return 0.0f;
+
+            return 1.0f / (1.0f + (float)Math.Exp(-x));
+        }
+
+        private float estimateFastEquityRealization(int nOfOpponents, bool facingBet)
+        {
+            if (_street == Street.River)
+                return 1.0f;
+
+            float realization;
+
+            if (_street == Street.Turn)
+                realization = 0.86f;
+            else
+                realization = 0.76f;
+
+            if (isPlayerInPosition(_heroInd))
+                realization += 0.07f;
+            else
+                realization -= 0.05f;
+
+            if (facingBet)
+                realization -= 0.04f;
+
+            if (nOfOpponents > 1)
+                realization -= 0.05f * (nOfOpponents - 1);
+
+            return ClampFloat(realization, 0.45f, 1.0f);
+        }
+
+        private float estimateVillainComboShowdownScore(HoleCards holeCards)
+        {
+            try
+            {
+                HandStrength hs = HandStrength.calculateHandStrength(holeCards, _board);
+
+                // HandRank e usado como score monotonico de showdown:
+                // HighCard < Pair < TwoPair < Trips < Straight < Flush < FullHouse < Quads < StraightFlush.
+                float madeScore = Clamp01(((int)hs.rank) / 8.0f);
+
+                int r0 = (int)holeCards.Card0.rank;
+                int r1 = (int)holeCards.Card1.rank;
+
+                float highCardScore = Clamp01(((r0 + r1) - 4.0f) / 24.0f);
+
+                return Clamp01((0.92f * madeScore) + (0.08f * highCardScore));
+            }
+            catch
+            {
+                return 0.50f;
+            }
+        }
+
+        private bool tryGetOpponentPostFlopModelProbabilities(int playerIndex, out float betRaiseProb, out float checkCallProb)
+        {
+            betRaiseProb = 0.10f;
+            checkCallProb = 0.45f;
+
+            try
+            {
+                if (playerIndex < 0 || playerIndex >= _players.Count)
+                    return false;
+
+                Player player = _players[playerIndex];
+
+                if (player == null || player.Model == null)
+                    return false;
+
+                int round = player.Round();
+                ActionType prevAction = (round == 0) ? player.PrevStreetAction : player.LastAction;
+
+                PostFlopParams prms = new PostFlopParams(
+                    getTableType(),
+                    getStreet(),
+                    round,
+                    prevAction,
+                    getNumBets(),
+                    isPlayerInPosition(playerIndex),
+                    numActivePlayers());
+
+                EstimatedAD ad = player.GetAD(prms);
+
+                betRaiseProb = ClampFloat(ad.BetRaise.Mean, 0.001f, 0.999f);
+                checkCallProb = ClampFloat(ad.CheckCall.Mean, 0.001f, 0.999f);
+
+                float sum = betRaiseProb + checkCallProb;
+
+                if (sum > 0.997f)
+                {
+                    float scale = 0.997f / sum;
+                    betRaiseProb *= scale;
+                    checkCallProb *= scale;
+                }
+
+                return true;
+            }
+            catch
+            {
+                betRaiseProb = 0.10f;
+                checkCallProb = 0.45f;
+                return false;
+            }
+        }
+
+        private FastOpponentResponse estimateFastOpponentResponseToHeroInvest(int playerIndex, int heroInvest)
+        {
+            Player player = _players[playerIndex];
+
+            FastOpponentResponse response = new FastOpponentResponse
+            {
+                Name = player.Name,
+                CallAmount = 0,
+                FoldProb = 1.0f,
+                CallProb = 0.0f,
+                RaiseProb = 0.0f,
+                ContinueStrength = 0.0f,
+                RequiredEquity = 1.0f
+            };
+
+            if (player.StatusInHand == Status.Folded || player.StatusInHand == Status.AllIn)
+                return response;
+
+            int heroTargetTotal = getHero().MoneyInPot + heroInvest;
+            int callAmount = heroTargetTotal - player.MoneyInPot;
+
+            if (callAmount < 0)
+                callAmount = 0;
+
+            if (callAmount > player.Stack)
+                callAmount = player.Stack;
+
+            response.CallAmount = callAmount;
+
+            int potAfterHeroAction = potSize() + heroInvest;
+            int potIfCalled = Math.Max(1, potAfterHeroAction + callAmount);
+
+            float requiredEquity = callAmount > 0
+                ? callAmount / (float)potIfCalled
+                : 0.0f;
+
+            response.RequiredEquity = requiredEquity;
+
+            float mass = 0.0f;
+            float continueMass = 0.0f;
+            float raiseMass = 0.0f;
+            float continueStrengthMass = 0.0f;
+
+            float softness = (_street == Street.River) ? 0.070f : ((_street == Street.Turn) ? 0.095f : 0.120f);
+            float pricePressure = callAmount / (float)Math.Max(1, potAfterHeroAction + callAmount);
+
+            bool canRaise =
+                (_numBets + 1 < 4) &&
+                callAmount < player.Stack &&
+                numActiveNonAllInPlayers() > 1;
+
+            foreach (var pair in player.Range.Data)
+            {
+                if (pair.Equity <= 0.0000001f)
+                    continue;
+
+                HoleCards combo = pair.GetHoleCards();
+                float score = estimateVillainComboShowdownScore(combo);
+                float weight = pair.Equity;
+
+                float continueLikelihood = FastSigmoid((score - requiredEquity) / softness);
+
+                float raiseThreshold = requiredEquity + 0.18f + (0.10f * pricePressure);
+                float raiseLikelihood = canRaise
+                    ? FastSigmoid((score - raiseThreshold) / softness)
+                    : 0.0f;
+
+                if (raiseLikelihood > continueLikelihood)
+                    raiseLikelihood = continueLikelihood;
+
+                mass += weight;
+                continueMass += weight * continueLikelihood;
+                raiseMass += weight * raiseLikelihood;
+                continueStrengthMass += weight * continueLikelihood * score;
+            }
+
+            if (mass <= 0.0f)
+                return response;
+
+            float rangeContinueProb = Clamp01(continueMass / mass);
+            float rangeRaiseProb = Clamp01(raiseMass / mass);
+            float rangeContinueStrength = continueMass > 0.0f
+                ? Clamp01(continueStrengthMass / continueMass)
+                : 0.0f;
+
+            float modelBetRaiseProb;
+            float modelCheckCallProb;
+            tryGetOpponentPostFlopModelProbabilities(playerIndex, out modelBetRaiseProb, out modelCheckCallProb);
+
+            float modelContinueProb = ClampFloat(
+                (modelBetRaiseProb + modelCheckCallProb) * (1.0f - 0.35f * pricePressure),
+                0.02f,
+                0.98f);
+
+            float modelRaiseProb = canRaise
+                ? ClampFloat(modelBetRaiseProb * (1.0f - 0.50f * pricePressure), 0.0f, 0.50f)
+                : 0.0f;
+
+            float continueProb = ClampFloat(
+                (0.70f * rangeContinueProb) + (0.30f * modelContinueProb),
+                0.02f,
+                0.98f);
+
+            float raiseProb = canRaise
+                ? ClampFloat((0.70f * rangeRaiseProb) + (0.30f * modelRaiseProb), 0.0f, continueProb * 0.65f)
+                : 0.0f;
+
+            float callProb = ClampFloat(continueProb - raiseProb, 0.0f, 1.0f);
+            float foldProb = ClampFloat(1.0f - callProb - raiseProb, 0.0f, 1.0f);
+
+            response.FoldProb = foldProb;
+            response.CallProb = callProb;
+            response.RaiseProb = raiseProb;
+            response.ContinueStrength = rangeContinueStrength;
+
+            return response;
+        }
+
+        private float estimateFastBetRaiseEV(int heroInvest, float heroEquity, out string report)
+        {
+            StringBuilder sb = new StringBuilder();
+
+            int potBeforeAction = potSize();
+
+            float allFoldProb = 1.0f;
+            float noRaiseProb = 1.0f;
+            float expectedCallMoney = 0.0f;
+            float expectedCallers = 0.0f;
+            float continueStrengthWeighted = 0.0f;
+            float continueStrengthWeight = 0.0f;
+
+            sb.Append($"    size={heroInvest}: ");
+
+            for (int i = 0; i < _players.Count; i++)
+            {
+                if (i == _heroInd)
+                    continue;
+
+                Player player = _players[i];
+
+                if (player.StatusInHand == Status.Folded || player.StatusInHand == Status.AllIn)
+                    continue;
+
+                FastOpponentResponse r = estimateFastOpponentResponseToHeroInvest(i, heroInvest);
+
+                allFoldProb *= r.FoldProb;
+                noRaiseProb *= (1.0f - r.RaiseProb);
+
+                expectedCallMoney += r.CallProb * r.CallAmount;
+                expectedCallers += r.CallProb;
+
+                continueStrengthWeighted += r.ContinueStrength * (r.CallProb + r.RaiseProb);
+                continueStrengthWeight += (r.CallProb + r.RaiseProb);
+
+                sb.Append($"[{r}] ");
+            }
+
+            float anyRaiseProb = Clamp01(1.0f - noRaiseProb);
+            float callNoRaiseProb = Clamp01(noRaiseProb - allFoldProb);
+
+            float conditionalCallMoney = callNoRaiseProb > 0.0001f
+                ? expectedCallMoney / callNoRaiseProb
+                : 0.0f;
+
+            float conditionalCallers = callNoRaiseProb > 0.0001f
+                ? expectedCallers / callNoRaiseProb
+                : 0.0f;
+
+            conditionalCallers = ClampFloat(conditionalCallers, 0.0f, Math.Max(1, numActivePlayers() - 1));
+
+            float avgContinueStrength = continueStrengthWeight > 0.0001f
+                ? Clamp01(continueStrengthWeighted / continueStrengthWeight)
+                : 0.0f;
+
+            float equityPenalty = 1.0f - (0.18f * avgContinueStrength) - (0.07f * Math.Max(0.0f, conditionalCallers - 1.0f));
+            equityPenalty = ClampFloat(equityPenalty, 0.48f, 1.0f);
+
+            float equityWhenCalled = Clamp01(heroEquity * equityPenalty);
+
+            float callBranchPot = potBeforeAction + heroInvest + conditionalCallMoney;
+            float callBranchEV = (equityWhenCalled * callBranchPot) - heroInvest;
+
+            // Versao rapida e conservadora:
+            // se tomamos raise, assumimos que a perda minima do ramo e o investimento feito agora.
+            float raiseBranchEV = -heroInvest;
+
+            float ev =
+                (allFoldProb * potBeforeAction) +
+                (callNoRaiseProb * callBranchEV) +
+                (anyRaiseProb * raiseBranchEV);
+
+            sb.Append($"allFold={allFoldProb:P1}, callNoRaise={callNoRaiseProb:P1}, anyRaise={anyRaiseProb:P1}, ");
+            sb.Append($"eqOH={heroEquity:P1}, eqCallAdj={equityWhenCalled:P1}, callPot={callBranchPot:F1}, EV={ev:F3}");
+
+            report = sb.ToString();
+            return ev;
+        }
+
+        public BotDecision calculateHeroFastPostFlopAction(double ohEquity, string equitySource)
+        {
+            int nOfOpponents = numActivePlayers() - 1;
+            int amountToCall = getAmountToCall();
+            int pot = potSize();
+            int stack = getHero().Stack;
+            bool facingBet = amountToCall > 0;
+
+            DateTime startTime = DateTime.Now;
+
+            BotDecision bd = new BotDecision
+            {
+                actionType = facingBet ? ActionType.Fold : ActionType.Check,
+                byAmount = 0,
+                checkCallEV = 0.0f,
+                betRaiseEV = float.NegativeInfinity,
+                timeSpentSeconds = 0,
+                message = "",
+                usedMultiSizeEV = false,
+                sizingReport = ""
+            };
+
+            if (_street == Street.PreFlop)
+            {
+                bd.message = "FastPostFlopEV chamado no preflop; retornando NoAction.";
+                bd.actionType = ActionType.NoAction;
+                return bd;
+            }
+
+            if (!_fastPostFlopEVEnabled)
+            {
+                bd.message = "FastPostFlopEV desativado por configuracao runtime.";
+                bd.actionType = ActionType.NoAction;
+                return bd;
+            }
+
+            if (_playerToActInd != _heroInd)
+            {
+                bd.actionType = ActionType.NoAction;
+                bd.message = "Player to act is not hero";
+                return bd;
+            }
+
+            if (nOfOpponents <= 0)
+            {
+                bd.actionType = ActionType.Check;
+                bd.message = "FastPostFlopEV: nenhum oponente ativo.";
+                return bd;
+            }
+
+            float heroEquity = Clamp01((float)ohEquity);
+            float realization = estimateFastEquityRealization(nOfOpponents, facingBet);
+
+            float checkCallEV;
+
+            if (facingBet)
+            {
+                float realizedEquity = Clamp01(heroEquity * realization);
+                int potAfterCall = pot + amountToCall;
+                checkCallEV = (realizedEquity * potAfterCall) - amountToCall;
+            }
+            else
+            {
+                checkCallEV = heroEquity * pot * realization;
+            }
+
+            bd.checkCallEV = checkCallEV;
+
+            StringBuilder report = new StringBuilder();
+            report.AppendLine(" -> FastPostFlopEV ativado: OH fornece equity; G5 calcula EV leve por acao/size.");
+            report.AppendLine($"    equitySource={equitySource}, equityOH={heroEquity:P2}, realization={realization:P1}, pot={pot}, amountToCall={amountToCall}, stack={stack}, opponents={nOfOpponents}.");
+            report.AppendLine($"    EV_{(facingBet ? "call" : "check")}={checkCallEV:F3}; EV_fold=0.000.");
+
+            float bestBetRaiseEV = float.NegativeInfinity;
+            int bestAmount = 0;
+
+            if (canHeroBetRaiseNow())
+            {
+                List<int> candidates = buildPostFlopBetRaiseCandidates();
+
+                foreach (int candidate in candidates)
+                {
+                    string candidateReport;
+                    float candidateEV = estimateFastBetRaiseEV(candidate, heroEquity, out candidateReport);
+                    report.AppendLine(candidateReport);
+
+                    if (candidateEV > bestBetRaiseEV)
+                    {
+                        bestBetRaiseEV = candidateEV;
+                        bestAmount = candidate;
+                    }
+                }
+            }
+
+            bd.betRaiseEV = float.IsNegativeInfinity(bestBetRaiseEV) ? -999999.0f : bestBetRaiseEV;
+            bd.sizingReport = report.ToString();
+            bd.usedMultiSizeEV = bestAmount > 0;
+
+            if (facingBet)
+            {
+                if (bestAmount > 0 && bestBetRaiseEV > Math.Max(0.0f, checkCallEV))
+                {
+                    bd.actionType = ActionType.Raise;
+                    bd.byAmount = bestAmount;
+                    bd.message += " -> FastPostFlopEV: raise escolhido por maior EV liquido.\n";
+                }
+                else if (checkCallEV >= 0.0f)
+                {
+                    bd.actionType = ActionType.Call;
+                    bd.byAmount = amountToCall;
+                    bd.message += " -> FastPostFlopEV: call escolhido por EV liquido nao-negativo e superior ao raise.\n";
+                }
+                else
+                {
+                    bd.actionType = ActionType.Fold;
+                    bd.byAmount = 0;
+                    bd.message += " -> FastPostFlopEV: fold escolhido; call e raise possuem EV inferior a fold.\n";
+                }
+            }
+            else
+            {
+                if (bestAmount > 0 && bestBetRaiseEV > checkCallEV)
+                {
+                    bd.actionType = ActionType.Bet;
+                    bd.byAmount = bestAmount;
+                    bd.message += " -> FastPostFlopEV: bet escolhido por maior EV liquido.\n";
+                }
+                else
+                {
+                    bd.actionType = ActionType.Check;
+                    bd.byAmount = 0;
+                    bd.message += " -> FastPostFlopEV: check escolhido; nenhum size superou EV_check.\n";
+                }
+            }
+
+            if ((bd.actionType == ActionType.Bet || bd.actionType == ActionType.Raise) &&
+                IsAtLeastAllInCommitmentThreshold(bd.byAmount, stack))
+            {
+                bd.message += $" -> FastPostFlopEV: amount >= {_allInCommitmentPercent}% do stack; convertendo para all-in.\n";
+                bd.byAmount = stack;
+                bd.actionType = ActionType.AllIn;
+            }
+
+            bd.timeSpentSeconds = (DateTime.Now - startTime).TotalSeconds;
+
+            // O relatório detalhado fica apenas em sizingReport.
+            // appendAcademicDecisionDiagnostics já imprime sizingReport uma única vez.
+            appendAcademicDecisionDiagnostics(ref bd, amountToCall, nOfOpponents);
+            bd.message = bd.message.Trim();
+
+            return bd;
+        }
+
 		
 private int countHeroOvercardsToBoard()
 {
@@ -1780,6 +2354,99 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
             bd.message += diag.ToString();
         }
 
+        private bool tryCalculateHeroPreFlopChartActionFast(int amountToCall, DateTime startTime, out BotDecision bd)
+        {
+            bd = new BotDecision
+            {
+                actionType = ActionType.NoAction,
+                byAmount = 0,
+                betRaiseEV = 0.0f,
+                checkCallEV = 0.0f,
+                timeSpentSeconds = 0,
+                message = "",
+                usedMultiSizeEV = false,
+                sizingReport = ""
+            };
+
+            if (_street != Street.PreFlop)
+                return false;
+
+            if (_preFlopCharts == null)
+                return false;
+
+            var pfcActionDistribution = _preFlopCharts.GetActionDistribution(this, _preFlopChartsLevel);
+
+            if (pfcActionDistribution == null)
+                return false;
+
+            var heroPos = getHero().PreFlopPosition;
+            var villainPos = (_bettors.Count > 0) ? _bettors.Last() : Position.Empty;
+
+            bd.actionType = pfcActionDistribution.sample(_rng);
+
+            // Fast path: a chart é a política preflop. Estes campos são scores
+            // informativos da chart; não disparam DecisionMaking.EstimateEV.
+            bd.checkCallEV = pfcActionDistribution.ccProb;
+            bd.betRaiseEV = pfcActionDistribution.brProb + pfcActionDistribution.allinProb;
+
+            bd.message += $" -> FastPreFlopChart: decisao direta por chart, sem chamar DecisionMaking.EstimateEV.\n";
+            bd.message += $" -> Chart situation: Hero pos {heroPos}, villainPos {villainPos}, num bets {_numBets}, num callers {_numCallers}.\n";
+            bd.message += $" -> Preflop chart set: {getPreFlopChartsInfo()}.\n";
+            bd.message += $" -> Chart lookup: {_preFlopCharts.LastLookupInfo}.\n";
+            bd.message += $" -> Chart AD: allin={pfcActionDistribution.allinProb:F3}, br={pfcActionDistribution.brProb:F3}, cc={pfcActionDistribution.ccProb:F3}.\n";
+            bd.message += $" -> Sampled action is {bd.actionType}.\n";
+
+            if (bd.actionType == ActionType.Fold)
+            {
+                bd.byAmount = 0;
+
+                if (amountToCall == 0)
+                {
+                    bd.actionType = ActionType.Check;
+                    bd.message += " -> Chart retornou Fold, mas amountToCall=0; convertendo para Check.\n";
+                }
+            }
+            else if (bd.actionType == ActionType.Call)
+            {
+                bd.byAmount = amountToCall;
+
+                if (amountToCall == 0)
+                {
+                    bd.actionType = ActionType.Check;
+                    bd.message += " -> Chart retornou Call, mas amountToCall=0; convertendo para Check.\n";
+                }
+            }
+            else if (bd.actionType == ActionType.AllIn)
+            {
+                bd.byAmount = getHero().Stack;
+            }
+            else
+            {
+                bd.actionType = ActionType.Raise;
+                bd.byAmount = getRaiseAmount();
+
+                if (bd.byAmount <= 0)
+                {
+                    bd.actionType = amountToCall > 0 ? ActionType.Call : ActionType.Check;
+                    bd.byAmount = amountToCall;
+                    bd.message += " -> Chart retornou Raise, mas nao havia raise valido; usando Call/Check.\n";
+                }
+            }
+
+            if ((bd.actionType == ActionType.Bet || bd.actionType == ActionType.Raise) &&
+                IsAtLeastAllInCommitmentThreshold(bd.byAmount, getHero().Stack))
+            {
+                bd.message += $" -> FastPreFlopChart: amount >= {_allInCommitmentPercent}% do balance restante; convertendo para all-in.\n";
+                bd.byAmount = getHero().Stack;
+                bd.actionType = ActionType.AllIn;
+            }
+
+            bd.timeSpentSeconds = (DateTime.Now - startTime).TotalSeconds;
+            bd.message = bd.message.Trim();
+
+            return true;
+        }
+
         public BotDecision calculateHeroAction()
         {
             int nOfOpponents = numActivePlayers() - 1;
@@ -1813,6 +2480,14 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
 var startTime = DateTime.Now;
 int amountToCall = getAmountToCall();
 
+if (_street == Street.PreFlop)
+{
+    BotDecision chartDecision;
+
+    if (tryCalculateHeroPreFlopChartActionFast(amountToCall, startTime, out chartDecision))
+        return chartDecision;
+}
+
 if (_street == Street.Flop)
 {
     bd = calculateHeroFlopHeuristicAction(amountToCall, nOfOpponents);
@@ -1820,7 +2495,7 @@ if (_street == Street.Flop)
 
     if (IsAtLeastAllInCommitmentThreshold(bd.byAmount, _players[_heroInd].Stack))
     {
-        bd.message += $" -> But amount to put in pot is at least {ALL_IN_COMMITMENT_PERCENT}% of player's stack, so go all in!\n";
+        bd.message += $" -> But amount to put in pot is at least {_allInCommitmentPercent}% of player's stack, so go all in!\n";
         bd.byAmount = _players[_heroInd].Stack;
         bd.actionType = ActionType.AllIn;
     }
@@ -1944,7 +2619,7 @@ if (_numBets == 0 && _numCallers > 0)
 
             if (IsAtLeastAllInCommitmentThreshold(bd.byAmount, _players[_heroInd].Stack))
             {
-                bd.message += $" -> But amount to put in pot is at least {ALL_IN_COMMITMENT_PERCENT}% of player's stack, so go all in!\n";
+                bd.message += $" -> But amount to put in pot is at least {_allInCommitmentPercent}% of player's stack, so go all in!\n";
                 bd.byAmount = _players[_heroInd].Stack;
                 bd.actionType = ActionType.AllIn;
             }

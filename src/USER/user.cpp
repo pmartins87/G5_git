@@ -185,6 +185,15 @@ typedef void(__stdcall* FN_SetOHEquitySnapshot)(
     double nhandslo,
     double nhandsti);
 
+typedef void(__stdcall* FN_SetRuntimeConfig)(
+    int logCompleto,
+    int logRangesCompletos,
+    int fastPostFlopEVEnabled,
+    int allowAllInByCommitment,
+    int allInCommitmentPercent,
+    int allowHighSprAllInCandidate,
+    double maxSprForAllInCandidate);
+
 static HINSTANCE         hBridge = NULL;
 static FN_NewHand        pNewHand = nullptr;
 static FN_DealHoleCards  pDealHoleCards = nullptr;
@@ -193,7 +202,9 @@ static FN_GoToNextStreet pGoToNextStreet = nullptr;
 static FN_GetDecision                  pGetDecision = nullptr;
 static FN_UpdateEnhancedPrWinProfile   pUpdateEnhancedPrWinProfile = nullptr;
 static FN_SetOHEquitySnapshot          pSetOHEquitySnapshot = nullptr;
+static FN_SetRuntimeConfig             pSetRuntimeConfig = nullptr;
 static bool                            g_bridgeLoaded = false;
+static DecisionResult SafeGetDecision();
 
 // CAMINHO DINÂMICO
 static char g_g5BasePath[MAX_PATH] = "";
@@ -217,6 +228,7 @@ static bool   g_heroRegistered = false;
 static double g_cachedDecision = 0.0;
 static int    g_cachedActionType = ACT_FOLD;
 static int    g_cachedByAmount = 0;  // em centavos
+static int    g_runtimeAllInCommitmentPercent = 66;
 
 // =============================================================================
 // LEITURA DE VALORES MONETÁRIOS EM CENTAVOS
@@ -241,11 +253,19 @@ static int ReadChairCurrentBet(int chair) {
     return ReadChairCents("currentbet", chair);
 }
 
-static bool IsAtLeast66PercentOf(int intended, int realAllInAmount) {
-    if (realAllInAmount <= 0)
+static bool IsAtLeastConfiguredPercentOf(int intended, int realAllInAmount) {
+    if (realAllInAmount <= 0 || intended <= 0)
         return false;
 
-    return intended * 100 >= realAllInAmount * 66;
+    int pct = g_runtimeAllInCommitmentPercent;
+
+    if (pct < 1)
+        pct = 1;
+
+    if (pct > 100)
+        pct = 100;
+
+    return intended * 100 >= realAllInAmount * pct;
 }
 
 static bool IsPostFlopStreet(int ohStreet)
@@ -431,6 +451,58 @@ static double ReadOHSymbolSafe(const char* symbol)
     __except (1)
     {
         return 0.0;
+    }
+}
+
+static int ReadOHConfigInt(const char* symbol, int fallback, int minValue, int maxValue)
+{
+    double value = ReadOHSymbolSafe(symbol);
+
+    if (value != value || value < (double)minValue || value > (double)maxValue)
+        return fallback;
+
+    return (int)(value + (value >= 0.0 ? 0.5 : -0.5));
+}
+
+static double ReadOHConfigDouble(const char* symbol, double fallback, double minValue, double maxValue)
+{
+    double value = ReadOHSymbolSafe(symbol);
+
+    if (value != value || value < minValue || value > maxValue)
+        return fallback;
+
+    return value;
+}
+
+static void SendRuntimeConfigToBridge()
+{
+    if (!pSetRuntimeConfig)
+        return;
+
+    int logCompleto = ReadOHConfigInt("f$G5_LogCompleto", 0, 0, 1);
+    int logRangesCompletos = ReadOHConfigInt("f$G5_LogRangesCompletos", 0, 0, 1);
+    int fastPostFlopEVEnabled = ReadOHConfigInt("f$G5_FastPostFlopEV", 1, 0, 1);
+    int allowAllInByCommitment = ReadOHConfigInt("f$G5_AllInPorCommitment", 1, 0, 1);
+    int allInCommitmentPercent = ReadOHConfigInt("f$G5_AllInCommitmentPercent", 66, 1, 100);
+    int allowHighSprAllInCandidate = ReadOHConfigInt("f$G5_FastEV_AllInCandidatoSPRAlto", 0, 0, 1);
+    double maxSprForAllInCandidate = ReadOHConfigDouble("f$G5_FastEV_MaxSPRParaAllInCandidato", 1.25, 0.01, 20.0);
+
+    g_runtimeAllInCommitmentPercent = allInCommitmentPercent;
+
+    __try
+    {
+        pSetRuntimeConfig(
+            logCompleto,
+            logRangesCompletos,
+            fastPostFlopEVEnabled,
+            allowAllInByCommitment,
+            allInCommitmentPercent,
+            allowHighSprAllInCandidate,
+            maxSprForAllInCandidate);
+    }
+    __except (1)
+    {
+        WriteLog("[user.cpp] EXCECAO ao enviar RuntimeConfig para G5Bridge.\n");
     }
 }
 
@@ -928,7 +1000,7 @@ static DecisionResult BuildPostFlopFallbackDecision(const char* reason, int amou
     d.actionType = ACT_FOLD;
     d.byAmount = amountToCall;
 
-    WriteLog("[user.cpp] OH PostFlop Fallback: %s -> Fold apenas porque nao havia Enhanced, equity OH valida, nem bet pequena. call=$%.2f limite=$%.2f pot=$%.2f.\n",
+    WriteLog("[user.cpp] OH PostFlop Fallback: %s -> Fold porque nao havia Enhanced, nem equity OH valida, nem bet pequena. call=$%.2f limite=$%.2f pot=$%.2f.\n",
         reason ? reason : "sem motivo informado",
         amountToCall / 100.0,
         cheapCallLimit / 100.0,
@@ -1019,6 +1091,40 @@ static DecisionResult BuildPostFlopDecisionFromEnhancedPrWin(int ohStreet)
 
         return BuildPostFlopFallbackDecision(reason, amountToCall, potBeforeCall);
     }
+
+    // A partir daqui o OH ja calculou equity com EnhancedPrWin e o snapshot
+    // ja foi enviado para a G5Bridge. A decisao estrategica passa a ser do
+    // G5 FastPostFlopEV: OH = motor rapido de equity; G5 = motor leve de EV.
+    DecisionResult g5Decision = SafeGetDecision();
+
+    if (g5Decision.actionType >= ACT_FOLD && g5Decision.actionType <= ACT_ALLIN)
+    {
+        if ((g5Decision.actionType == ACT_BET || g5Decision.actionType == ACT_RAISE) &&
+            g5Decision.byAmount > 0)
+        {
+            int heroStreetBet = ReadChairCurrentBet(g_heroChair);
+            int heroTotal = GetHeroTotalStackCents();
+
+            int raiseToTotal = heroStreetBet + g5Decision.byAmount;
+
+            if (heroTotal > 0 && raiseToTotal > heroTotal)
+                raiseToTotal = heroTotal;
+
+            if (raiseToTotal > heroStreetBet)
+                g5Decision.byAmount = raiseToTotal;
+        }
+
+        WriteLog("[user.cpp] OH EnhancedPrWin confirmado; decisao delegada ao G5 FastPostFlopEV: %s amount=$%.2f ccEV=%.3f brEV=%.3f.\n",
+            ActionName(g5Decision.actionType),
+            g5Decision.byAmount / 100.0,
+            g5Decision.checkCallEV,
+            g5Decision.betRaiseEV);
+
+        return g5Decision;
+    }
+
+    WriteLog("[user.cpp] G5 FastPostFlopEV nao retornou decisao valida; usando fallback OH local. actionType=%d.\n",
+        g5Decision.actionType);
 
     double potAfterCall = (double)potBeforeCall + (double)amountToCall;
 
@@ -1236,8 +1342,26 @@ static void SafeNewAction(int playerIndex, int actionType, int byAmount) {
 
 static DecisionResult SafeGetDecision() {
     DecisionResult d = {};
-    __try { if (pGetDecision) d = pGetDecision(); }
-    __except (1) { WriteLog("[user.cpp] EXCECAO em pGetDecision\n"); d.actionType = ACT_FOLD; }
+    d.actionType = -1;
+    d.byAmount = 0;
+    d.checkCallEV = 0.0f;
+    d.betRaiseEV = 0.0f;
+
+    SendRuntimeConfigToBridge();
+
+    __try
+    {
+        if (pGetDecision)
+            d = pGetDecision();
+        else
+            WriteLog("[user.cpp] ERRO: pGetDecision indisponivel.\n");
+    }
+    __except (1)
+    {
+        WriteLog("[user.cpp] EXCECAO em pGetDecision\n");
+        d.actionType = -1;
+    }
+
     return d;
 }
 
@@ -1776,6 +1900,7 @@ static void InitializeBridge() {
 pGetDecision = (FN_GetDecision)GetProcAddress(hBridge, "G5Bridge_GetDecision");
 pUpdateEnhancedPrWinProfile = (FN_UpdateEnhancedPrWinProfile)GetProcAddress(hBridge, "G5Bridge_UpdateEnhancedPrWinProfile");
 pSetOHEquitySnapshot = (FN_SetOHEquitySnapshot)GetProcAddress(hBridge, "G5Bridge_SetOHEquitySnapshot");
+pSetRuntimeConfig = (FN_SetRuntimeConfig)GetProcAddress(hBridge, "G5Bridge_SetRuntimeConfig");
 
 if (pNewHand && pDealHoleCards && pNewAction && pGoToNextStreet && pGetDecision) {
     g_bridgeLoaded = true;
@@ -1918,6 +2043,7 @@ DLL_IMPLEMENTS double __stdcall ProcessQuery(const char* pquery)
 
     InitializeBridge();
     if (!g_bridgeLoaded) return 0;
+    SendRuntimeConfigToBridge();
     if (strncmp(pquery, "dll$decisao", 11) != 0) return 0;
 
     int heroChair = (int)GetSymbol("userchair");
@@ -1998,14 +2124,15 @@ else
         int realAllInTotal = heroBalNow + heroBetNow;
 
         bool validAllIn =
-            IsAtLeast66PercentOf(intended, realAllInDelta) ||
-            IsAtLeast66PercentOf(intended, realAllInTotal);
+            IsAtLeastConfiguredPercentOf(intended, realAllInDelta) ||
+            IsAtLeastConfiguredPercentOf(intended, realAllInTotal);
 
         if (validAllIn) {
             finalAction = "BetMax";
             returnValue = 5.0;
 
-            WriteLog("[user.cpp] ALLIN VALIDADO 66%%: intended=%d ($%.2f), balance c%d=%d ($%.2f), currentbet c%d=%d ($%.2f), total=%d ($%.2f).\n",
+            WriteLog("[user.cpp] ALLIN VALIDADO %d%%: intended=%d ($%.2f), balance c%d=%d ($%.2f), currentbet c%d=%d ($%.2f), total=%d ($%.2f).\n",
+                g_runtimeAllInCommitmentPercent,
                 intended, intended / 100.0,
                 g_heroChair, heroBalNow, heroBalNow / 100.0,
                 g_heroChair, heroBetNow, heroBetNow / 100.0,
@@ -2018,7 +2145,8 @@ else
             finalAction = "Raise";
             returnValue = 4.0;
 
-            WriteLog("[user.cpp] ALLIN BLOQUEADO 66%%: intended=%d ($%.2f), balance c%d=%d ($%.2f), currentbet c%d=%d ($%.2f), total=%d ($%.2f). Convertendo para Raise.\n",
+            WriteLog("[user.cpp] ALLIN BLOQUEADO %d%%: intended=%d ($%.2f), balance c%d=%d ($%.2f), currentbet c%d=%d ($%.2f), total=%d ($%.2f). Convertendo para Raise.\n",
+                g_runtimeAllInCommitmentPercent,
                 intended, intended / 100.0,
                 g_heroChair, heroBalNow, heroBalNow / 100.0,
                 g_heroChair, heroBetNow, heroBetNow / 100.0,
@@ -2045,7 +2173,7 @@ else
 
     if (IsPostFlopStreet(ohStreet))
         decisionOrigin = g_lastPostFlopDecisionUsedEnhancedPrWin
-            ? "OH EnhancedPrWin confirmado"
+            ? "G5 FastPostFlopEV com OH EnhancedPrWin confirmado"
             : "OH EnhancedPrWin nao confirmado";
 
     WriteLog("[user.cpp] user.dll decidiu: %s (amount=$%.2f | ccEV=%.2f brEV=%.2f | origem=%s) -> %.0f\n",

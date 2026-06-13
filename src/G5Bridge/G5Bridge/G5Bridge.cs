@@ -71,6 +71,14 @@ private static bool _handSyncFailed = false;
         // =========================================================================
         public static bool EnableDiagnosticLogs { get; private set; } = false;
 
+        private static bool _runtimeLogCompleto = false;
+        private static bool _runtimeLogRangesCompletos = false;
+        private static bool _runtimeFastPostFlopEVEnabled = true;
+        private static bool _runtimeAllowAllInByCommitment = true;
+        private static int _runtimeAllInCommitmentPercent = 66;
+        private static bool _runtimeAllowHighSprAllInCandidate = false;
+        private static double _runtimeMaxSprForAllInCandidate = 1.25;
+
         // Opcional. Por padrao fica false para manter log limpo.
         // Para ver todos os combos ativos dos ranges, mude para true no codigo
         // ou use a variavel de ambiente G5BRIDGE_MOSTRAR_RANGES_COMPLETOS=1.
@@ -78,6 +86,9 @@ private static bool _handSyncFailed = false;
 
         private static bool IsDiagnosticLogEnabled()
         {
+            if (_runtimeLogCompleto)
+                return true;
+
             if (EnableDiagnosticLogs)
                 return true;
 
@@ -107,6 +118,9 @@ private static bool _handSyncFailed = false;
 
         private static bool MostrarRangesCompletos()
         {
+            if (_runtimeLogCompleto || _runtimeLogRangesCompletos)
+                return true;
+
             if (mostrarRangesCompletos)
                 return true;
 
@@ -688,6 +702,52 @@ private static bool _handSyncFailed = false;
             return true;
         }
 
+        [DllExport("G5Bridge_SetRuntimeConfig", CallingConvention = CallingConvention.StdCall)]
+        [MethodImpl(MethodImplOptions.Synchronized)]
+        public static void SetRuntimeConfig(
+            int logCompleto,
+            int logRangesCompletos,
+            int fastPostFlopEVEnabled,
+            int allowAllInByCommitment,
+            int allInCommitmentPercent,
+            int allowHighSprAllInCandidate,
+            double maxSprForAllInCandidate)
+        {
+            _runtimeLogCompleto = logCompleto != 0;
+            _runtimeLogRangesCompletos = logRangesCompletos != 0;
+            _runtimeFastPostFlopEVEnabled = fastPostFlopEVEnabled != 0;
+            _runtimeAllowAllInByCommitment = allowAllInByCommitment != 0;
+
+            if (allInCommitmentPercent < 1)
+                allInCommitmentPercent = 1;
+
+            if (allInCommitmentPercent > 100)
+                allInCommitmentPercent = 100;
+
+            _runtimeAllInCommitmentPercent = allInCommitmentPercent;
+            _runtimeAllowHighSprAllInCandidate = allowHighSprAllInCandidate != 0;
+
+            if (double.IsNaN(maxSprForAllInCandidate) || double.IsInfinity(maxSprForAllInCandidate) || maxSprForAllInCandidate <= 0.0)
+                maxSprForAllInCandidate = 1.25;
+
+            if (maxSprForAllInCandidate > 20.0)
+                maxSprForAllInCandidate = 20.0;
+
+            _runtimeMaxSprForAllInCandidate = maxSprForAllInCandidate;
+
+            BotGameState.ConfigureRuntimeOptions(
+                _runtimeFastPostFlopEVEnabled,
+                _runtimeAllowAllInByCommitment,
+                _runtimeAllInCommitmentPercent,
+                _runtimeAllowHighSprAllInCandidate,
+                _runtimeMaxSprForAllInCandidate);
+
+            DLog($"[RuntimeConfig] LogCompleto={_runtimeLogCompleto}, LogRangesCompletos={_runtimeLogRangesCompletos}, " +
+                $"FastPostFlopEV={_runtimeFastPostFlopEVEnabled}, AllInCommitment={_runtimeAllowAllInByCommitment}, " +
+                $"CommitmentPercent={_runtimeAllInCommitmentPercent}, HighSPRJamCandidate={_runtimeAllowHighSprAllInCandidate}, " +
+                $"MaxSPRJam={_runtimeMaxSprForAllInCandidate:F2}.");
+        }
+
         [DllExport("G5Bridge_UpdateEnhancedPrWinProfile", CallingConvention = CallingConvention.StdCall)]
         [MethodImpl(MethodImplOptions.Synchronized)]
         public static int UpdateEnhancedPrWinProfile(
@@ -1054,7 +1114,7 @@ try
 {
     _gameState.dealHoleCards(new Card(c0), new Card(c1));
     Log("[DealHoleCards] OK.");
-    Log($"[Ranges] apos DealHoleCards: {GetOpponentRangesDiagnosticsForLog()}");
+    DLog($"[Ranges] apos DealHoleCards: {GetOpponentRangesDiagnosticsForLog()}");
 }
 catch (Exception ex) { Log($"[DealHoleCards] ERRO: {ex.Message}"); }
         }
@@ -1111,7 +1171,7 @@ private static void InternalNewAction(int playerLogIdx, int actionType, int byAm
 _gameState.playerActs((ActionType)actionType, byAmount);
 Log($"[{src}] OK - {GetActionName(actionType)} by {byAmount}. " +
     $"Proximo={GetPositionName(_gameState.getPlayerToActInd(), _buttonIndex, _numPlayers)}");
-Log($"[Ranges] apos {src} {GetActionName(actionType)} by {byAmount}: {GetOpponentRangesDiagnosticsForLog()}");
+DLog($"[Ranges] apos {src} {GetActionName(actionType)} by {byAmount}: {GetOpponentRangesDiagnosticsForLog()}");
     }
     catch (Exception ex)
     {
@@ -1226,7 +1286,7 @@ if (_streetSyncFailed)
 
 _gameState.goToNextStreet(new List<Card> { f0, f1, f2 });
 Log($"[{src}] Flop: {c0} {c1} {c2}");
-Log($"[Ranges] apos Flop: {GetOpponentRangesDiagnosticsForLog()}");
+DLog($"[Ranges] apos Flop: {GetOpponentRangesDiagnosticsForLog()}");
                 }
                 else if (n == 1)
                 {
@@ -1253,7 +1313,7 @@ Log($"[Ranges] apos Flop: {GetOpponentRangesDiagnosticsForLog()}");
 
 _gameState.goToNextStreet(card);
 Log($"[{src}] {_gameState.getStreet()}: {c0}");
-Log($"[Ranges] apos {_gameState.getStreet()}: {GetOpponentRangesDiagnosticsForLog()}");
+DLog($"[Ranges] apos {_gameState.getStreet()}: {GetOpponentRangesDiagnosticsForLog()}");
                 }
                 else
                 {
@@ -1304,15 +1364,6 @@ if (_handSyncFailed || _streetSyncFailed)
     return result;
 }
 
-
-if (_gameState.getStreet() != Street.PreFlop)
-{
-    Log($"[GetDecision] Pós-flop bloqueado na G5Bridge. " +
-        $"A Fase 2 usa OH EnhancedPrWin na user.dll e nao calcula _gameState.calculateHeroAction() no pós-flop.");
-    Log("------------------------------------------------");
-    return result;
-}
-
             try
             {
                 int playerToAct = _gameState.getPlayerToActInd();
@@ -1330,12 +1381,38 @@ if (_gameState.getStreet() != Street.PreFlop)
                     return result;
                 }
 
-                DLog("[GetDecision] Chamando _gameState.calculateHeroAction()...");
-
                 if (IsDiagnosticLogEnabled())
                     LogLoadedNativeModules();
 
-                var d = _gameState.calculateHeroAction();
+                BotGameState.BotDecision d;
+
+                if (_gameState.getStreet() == Street.PreFlop)
+                {
+                    DLog("[GetDecision] Chamando _gameState.calculateHeroAction() no preflop...");
+                    d = _gameState.calculateHeroAction();
+                }
+                else
+                {
+                    if (!_runtimeFastPostFlopEVEnabled)
+                    {
+                        Log("[GetDecision] FastPostFlopEV desativado por G5cash.txt. Retornando actionType=-1 para fallback da user.dll.");
+                        Log("------------------------------------------------");
+                        return result;
+                    }
+
+                    double equity;
+                    string equityReason;
+
+                    if (!TryGetFreshOHEquity(out equity, out equityReason))
+                    {
+                        Log($"[GetDecision] FastPostFlopEV bloqueado: equity OH indisponivel/invalida. Motivo={equityReason}. Retornando actionType=-1 para fallback da user.dll.");
+                        Log("------------------------------------------------");
+                        return result;
+                    }
+
+                    DLog($"[GetDecision] Chamando _gameState.calculateHeroFastPostFlopAction() com equityOH={equity:P2}...");
+                    d = _gameState.calculateHeroFastPostFlopAction(equity, "OH EnhancedPrWin");
+                }
 
                 result.actionType = (int)d.actionType;
                 result.byAmount = d.byAmount;

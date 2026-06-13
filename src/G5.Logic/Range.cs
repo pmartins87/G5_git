@@ -14,7 +14,7 @@ namespace G5.Logic
         // Opcional. Por padrao fica false para nao poluir os logs.
         // Quando true, os diagnosticos mostram todos os combos ativos do range,
         // nao apenas o top.
-        public static bool mostrarRangesCompletos = true;
+        public static bool mostrarRangesCompletos = false;
 
         /// <summary>
         /// Struktura koja pamti Hole-Cards index i equity koji im je pridruzen.
