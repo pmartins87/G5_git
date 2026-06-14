@@ -1,0 +1,2207 @@
+//************************************************************************************************************************************** 	
+//                                                       
+//                                                      #00 - NOTES
+//
+//**************************************************************************************************************************************
+##notes##
+//#00 - NOTES
+//#01 - CONFIG
+//#02 - CORE
+//#03 - POSTFLOP DEFEND
+//#04 - POSTFLOP ATTACK
+//#05 - PREFLOP ACTION
+//#06 - FLOP ACTION
+//#07 - TURN ACTION
+//#08 - RIVER ACTION
+//#09 - SCENARIOS
+//#10 - HANDLISTS 
+//#11 - BETSIZES
+//#12 - 
+
+//************************************************************************************************************************************** 	
+//                                                       
+//                                                      #01 - CONFIG
+//
+//**************************************************************************************************************************************
+##f$ini_function_on_new_round##
+me_st_Initiativegotraised_0
+
+##f$ini_function_on_startup##
+me_st_didactionthismatch_1
+
+##f$ini_function_on_connection##
+me_st_didactionthismatch_1
+
+	
+
+//=============================================================================//
+// G5 Runtime Config
+// Estas funcoes sao lidas pela user.dll e enviadas para a G5Bridge.
+// Alterar aqui nao exige recompilar DLL.
+//=============================================================================//
+
+##f$G5_LogCompleto##
+// 1 = ativa logs diagnosticos completos da bridge.
+// 0 = logs normais/resumidos para melhor performance.
+When Others Return 0 Force
+
+##f$G5_LogRangesCompletos##
+// 1 = mostra ranges completos dos adversarios e cortes completos.
+// 0 = nao imprime ranges no log normal; ranges ficam apenas no diagnostico.
+When Others Return 0 Force
+
+##f$G5_FastPostFlopEV##
+// 1 = usa FastEV pos-flop: OH EnhancedPrWin fornece equity e G5 calcula EV leve.
+// 0 = desativa FastEV e deixa a user.dll usar o fallback local pos-flop.
+When Others Return 1 Force
+
+##f$G5_AllInPorCommitment##
+// 1 = converte bet/raise em all-in quando o valor a colocar compromete
+//     pelo menos f$G5_AllInCommitmentPercent do balance restante.
+// 0 = nao faz conversao automatica por commitment.
+When Others Return 1 Force
+
+##f$G5_AllInCommitmentPercent##
+// Percentual do balance restante usado para converter bet/raise em all-in.
+// Exemplo: balance=100, aposta adicional=70, threshold=66 => all-in.
+When Others Return 66 Force
+
+##f$G5_FastEV_AllInCandidatoSPRAlto##
+// 1 = permite que all-in entre como candidato normal do FastEV mesmo em SPR alto.
+// 0 = all-in so entra como candidato se o SPR estiver baixo; ainda pode haver
+//     conversao para all-in por commitment acima.
+When Others Return 0 Force
+
+##f$G5_FastEV_MaxSPRParaAllInCandidato##
+// Com f$G5_FastEV_AllInCandidatoSPRAlto=0, all-in so entra como candidato
+// natural quando SPR <= este valor. A conversao por commitment continua separada.
+When Others Return 1.25 Force
+
+//=============================================================================//
+// Enhanced PrWin / PrWin config
+// Uso estritamente academico/offline em ambiente controlado.
+// A decisao continua vindo de dll$decisao; estas funcoes apenas configuram
+// o motor PrWin do OpenHoldem usado pela user.dll.
+//=============================================================================//
+
+##f$prwin_number_of_iterations##
+// A documentacao do OH indica que a precisao do prwin depende do numero
+// de iteracoes. Para a Fase 2 usamos 10000 como ponto inicial entre
+// velocidade e estabilidade.
+When Others Return 10000 Force
+
+##f$prwin_number_of_opponents##
+// Enhanced PrWin usa os ranges por cadeira via DLL/prw1326.
+// Esta funcao fica definida para compatibilidade do motor PrWin e fallback.
+When nopponentsplaying > 0 Return nopponentsplaying Force
+When nopponentsdealt > 0 Return nopponentsdealt Force
+When Others Return 1 Force
+
+##f$allin_on_betsize_balance_ratio##
+// Allin if betsize is more than X% of our total balance (including currentbet).
+// This affects f$betsize and all f$betpot_Middle_Y_ functions. // Do not work When calling.
+//  0.00 =  0% = disabled
+//  0.50 = 50%
+//fail safe
+When (StackSize <= 0 || bblind <= 0) Return .00 Force
+// OH action codes:
+// RaiseThirdPot       -1000004
+// RaiseHalfPot        -1000005
+// RaiseTwoThirdPot    -1000006
+// RaiseThreeFourthPot -1000007
+// Raise               -1000012
+// Allin if betsize is more than X% of villain balance (when it returns .001 we are going all-in because betsize is more than 0.001% of our balance)
+When AmountToCall = 0 
+	When f$BestBetsize = -1000004 && PotSize*(0.33) >= f$EffectiveStack*0.50 Return .001 Force
+	When f$BestBetsize = -1000005 && PotSize*(0.50) >= f$EffectiveStack*0.50 Return .001 Force
+	When f$BestBetsize = -1000006 && PotSize*(0.66) >= f$EffectiveStack*0.50 Return .001 Force	
+	When f$BestBetsize = -1000007 && PotSize*(0.75) >= f$EffectiveStack*0.50 Return .001 Force
+	When f$BestBetsize >= f$EffectiveStack*0.50 Return .001 Force
+
+When Others
+	When f$BestBetsize = -1000012 && BetSize*3 >= f$EffectiveStack*0.50 Return .001 Force
+	When (f$BestBetsize - AmountToCall) >= (f$EffectiveStack*0.50) Return .001 Force
+	When Others Return .50 Force
+	
+//************************************************************************************************************************************** 	
+// 
+//                                                       #02 - CORE
+//                                                                                                                          
+//**************************************************************************************************************************************
+//=============================================================================//
+// Preflop Setup
+//=============================================================================//
+##f$preflop_Push##
+   (f$preflop_OpenShove
+OR f$preflop_ISO_Shove
+OR f$preflop_3bet_Shove
+OR f$preflop_Shove_v_3bet_Or_ISO_Normal
+OR f$preflop_Shove_v_OpenShove
+OR f$preflop_Shove_v_3bet_Or_ISO_Over
+OR f$preflop_Shove_v_4bet
+OR f$preflop_Shove_v_LimpRaise
+OR f$preflop_Shove_as_Backup)
+
+##f$preflop_Raise##
+   ((f$preflop_OpenRaise OR f$preflop_ISO_Normal OR f$preflop_3bet_Normal) 
+   OR (f$preflop_Call && HandIsHeadsup && AmountToCall >= 0.55*StackSize)) 
+
+##f$preflop_Call##
+When (f$preflop_OpenLimp OR f$preflop_Call_SRP_or_LP OR f$preflop_Call_v_3bet_Or_ISO_Normal) Return true Force
+
+//=============================================================================//
+// PostFlop Setup
+//=============================================================================//
+##f$flop_Raise##
+When f$Raise_Committed 				Return true Force
+When f$Init_Hero					Return f$flop_Raise_SRP_Initiative Force
+When f$Init_Villain					Return f$flop_Raise_SRP_Noinitiative Force
+When f$Init_Hero_Limped				Return f$flop_Raise_Limped_Initiative Force
+When f$Init_Villain_Limped			Return f$flop_Raise_Limped_Noinitiative Force
+When f$Init_GotRaised_Or_Isolated 	Return f$flop_Raise_GotRaised_or_Isolated Force
+
+##f$flop_Call##
+When f$Call_MicroBets 				Return true Force
+When f$Odds_and_Outs				Return true Force
+When f$Init_Hero					Return f$flop_Call_SRP_Initiative Force
+When f$Init_Villain 				Return f$flop_Call_SRP_Noinitiative Force
+When f$Init_Hero_Limped				Return f$flop_Call_Limped_Initiative Force
+When f$Init_Villain_Limped			Return f$flop_Call_Limped_Noinitiative Force
+When f$Init_GotRaised_Or_Isolated	Return f$flop_Call_GotRaised_or_Isolated Force
+
+##f$turn_Raise##
+When f$Raise_Committed 				 Return true Force
+When f$Init_Hero    				 Return f$turn_Raise_Initiative Force
+When f$Init_Villain  				 Return f$turn_Raise_Noinitiative Force
+When f$Init_Nobody   			     Return f$turn_Raise_Noaction Force
+When f$Init_GotRaised_Or_Isolated	 Return f$turn_Raise_GotRaised Force
+
+##f$turn_Call##
+When f$Call_MicroBets 				Return true Force
+When f$Odds_and_Outs  				Return true Force
+When f$Init_Hero    				Return f$turn_Call_Initiative Force
+When f$Init_Villain					Return f$turn_Call_Noinitiative Force
+When f$Init_Nobody    				Return f$turn_Call_Noaction Force
+When f$Init_GotRaised_Or_Isolated 	Return f$turn_Call_GotRaised Force
+
+##f$river_Raise##
+When f$Raise_Committed 				Return true Force
+When f$Init_Hero      				Return f$river_Raise_Initiative Force
+When f$Init_Villain   				Return f$river_Raise_Noinitiative Force
+When f$Init_Nobody  				Return f$river_Raise_noaction Force
+When f$Init_GotRaised_Or_Isolated	Return f$river_Raise_GotRaised Force
+
+##f$river_Call##
+When user_RiverCheckFoldTP 			Return false Force
+When f$Call_MicroBets 				Return true Force
+When f$Init_Hero					Return f$river_Call_Initiative Force
+When f$Init_Villain					Return f$river_Call_Noinitiative Force
+When f$Init_Nobody					Return f$river_Call_noaction Force
+When f$Init_GotRaised_Or_Isolated	Return f$river_Call_GotRaised Force
+
+##f$Call_MicroBets##
+// A code is needed to handle extremely small bets in relation to the pot, which are bets that are very unusual, the proposed code is below.
+When ((AmountToCall*bblind)>0) && ((AmountToCall*bblind)<=(potcommon*0.20)) && (hand$A || f$hand_PairOrBetter || f$hand_Gutshot_or_BetterDraw) Return true Force
+When ((AmountToCall*bblind)>0) && ((AmountToCall*bblind)<=(potcommon*0.16)) && (hand$K || f$hand_PairOrBetter || f$hand_Gutshot_or_BetterDraw) Return true Force
+When ((AmountToCall*bblind)>0) && ((AmountToCall*bblind)<=(potcommon*0.12)) && (hand$Q || f$hand_PairOrBetter || f$hand_Gutshot_or_BetterDraw) Return true Force
+When ((AmountToCall*bblind)>0) && ((AmountToCall*bblind)<=(potcommon*0.08)) && (hand$J || f$hand_PairOrBetter || f$hand_Gutshot_or_BetterDraw) Return true Force
+When ((AmountToCall*bblind)>0) && ((AmountToCall*bblind)<=(potcommon*0.04)) && (hand$T || f$hand_PairOrBetter || f$hand_Gutshot_or_BetterDraw) Return true Force
+When ((AmountToCall*bblind)>0) && ((AmountToCall*bblind)<=(potcommon*0.02)) && (hand$9 || f$hand_PairOrBetter || f$hand_Gutshot_or_BetterDraw) Return true Force
+
+##f$Raise_Committed##
+When IsFlop
+	// allin when calling more then 55% of our stack 
+	When f$flop_Call && AmountToCall > StackSize*0.55 Return true Force
+	// allin when villain bet more than 55% of his stack
+	When f$flop_Call &&  AmountToCall > 0 && HandIsHeadsup && (BetSize > 0.55*(BetSize + StackSize_headsupchair)) Return true Force
+	
+When IsTurn
+	// allin when calling more then 55% of our stack 
+	When f$turn_Call && AmountToCall > StackSize*0.55 Return true Force
+	// allin when villain bet more than 60% of his stack
+	When f$turn_Call &&  AmountToCall > 0 && HandIsHeadsup && (BetSize > 0.55*(BetSize + StackSize_headsupchair)) Return true Force
+	
+When IsRiver
+	// allin when calling more then 55% of our stack 
+	// on the river we will not inflate the pot by raising with a hand that would be a call, even if the opponent is committed
+	When f$river_Call && HandIsHeadsup && AmountToCall >= 0.55*StackSize Return true Force
+
+##f$preflop##
+//=============================================================================//
+// 										PreFlop
+//=============================================================================//
+When Others Return dll$decisao Force
+
+##f$flop##
+//=============================================================================//
+// 										Flop
+//=============================================================================//
+When Others Return dll$decisao Force
+
+##f$turn##
+//=============================================================================//
+// 										Turn
+//=============================================================================//
+When Others Return dll$decisao Force
+
+##f$river##
+//=============================================================================//
+// 										River
+//=============================================================================//
+When Others Return dll$decisao Force
+   
+//************************************************************************************************************************************** 	
+//                                                       
+//                                                      #03 - POSTFLOP DEFEND
+//
+//**************************************************************************************************************************************
+// 01- RAISE VS FLOP NORMAL CBET  
+// 02- CALL VS FLOP NORMAL CBET
+// 03- RAISE VS TURN NORMAL CBET
+// 04- CALL VS TURN NORMAL CBET
+// 05- RAISE VS RIVER NORMAL CBET
+// 06- CALL VS RIVER NORMAL CBET
+// 07- RAISE HIGH CBET
+// 08- CALL HIGH CBET
+// 09- RAISE OVER CBET
+// 10- CALL OVER CBET
+// 11- RAISE VS NORMAL DONK
+// 12- RAISE VS HIGH DONK
+// 13- RAISE VS OVER DONK
+// 14- CALL VS NORMAL DONK
+// 15- CALL VS HIGH DONK
+// 16- CALL VS OVER DONK
+// 17- RAISE VS NORMAL FLOAT
+// 18- RAISE VS HIGH FLOAT
+// 19- RAISE VS OVER FLOAT
+// 20- CALL VS NORMAL FLOAT
+// 21- CALL VS HIGH FLOAT
+// 22- CALL VS OVER FLOAT
+// 23- RAISE VS NORMAL BET
+// 24- RAISE VS HIGH FLOAT
+// 25- RAISE VS OVER FLOAT
+// 26- CALL VS NORMAL BET
+// 27- CALL VS HIGH FLOAT
+// 28- CALL VS OVER FLOAT
+// 29- RAISE VS NORMAL RAISE       //Not Raise vs Bet
+// 30- RAISE VS OVER RAISE       //Not Raise vs Bet
+// 31- CALL VS NORMAL RAISE
+// 32- CALL VS OVER RAISE 
+
+//=============================================================================//
+// 01- RAISE VS FLOP NORMAL CBET    
+//=============================================================================//
+##f$hand_flop_Raise_vs_Normal_Cbet##
+
+
+//=============================================================================//
+// 02-CALL VS FLOP NORMAL CBET    
+//=============================================================================//
+##f$hand_flop_Call_vs_Normal_Cbet##
+
+
+//=============================================================================//
+// 03- RAISE VS TURN NORMAL CBET    
+//=============================================================================//
+##f$hand_turn_Raise_vs_Normal_Cbet##
+
+
+//=============================================================================//
+// 04- CALL VS TURN NORMAL CBET    
+//=============================================================================//
+##f$hand_turn_Call_vs_Normal_Cbet##
+
+
+//=============================================================================//
+// 05- RAISE VS RIVER NORMAL CBET    
+//=============================================================================//
+##f$hand_river_Raise_vs_Normal_Cbet##
+
+
+//=============================================================================//
+// 06- CALL VS RIVER NORMAL CBET    
+//=============================================================================//
+##f$hand_river_Call_vs_Normal_Cbet##
+
+
+//=============================================================================//
+// 07- RAISE VS HIGH CBET    
+//=============================================================================//
+##f$hand_Raise_vs_High_Cbet##
+
+
+//=============================================================================//
+// 08- CALL VS HIGH CBET   
+//=============================================================================//
+##f$hand_Call_vs_High_Cbet##
+
+
+//=============================================================================//
+// 09- RAISE VS OVER CBET    
+//=============================================================================//
+##f$hand_Raise_vs_Over_Cbet##
+
+
+//=============================================================================//
+// 10- CALL VS OVER CBET   
+//=============================================================================//
+##f$hand_Call_vs_Over_Cbet##
+
+
+//=============================================================================//
+// 11- RAISE VS NORMAL DONK
+//=============================================================================//
+##f$hand_Raise_vs_Normal_Donk##
+
+
+//=============================================================================//
+// 12- RAISE VS HIGH DONK
+//=============================================================================//
+##f$hand_Raise_vs_High_Donk##
+
+
+//=============================================================================//
+// 13- RAISE VS OVER DONK
+//=============================================================================//
+##f$hand_Raise_vs_Over_Donk##
+
+
+//=============================================================================//
+// 14- CALL VS NORMAL DONK
+//=============================================================================//
+##f$hand_Call_vs_Normal_Donk##
+
+
+//=============================================================================//
+// 15- CALL VS HIGH DONK
+//=============================================================================//	
+##f$hand_Call_vs_High_Donk##
+
+
+//=============================================================================//
+// 16- CALL VS OVER DONK
+//=============================================================================//
+##f$hand_Call_vs_Over_Donk##
+
+
+//=============================================================================//
+// 17- RAISE VS NORMAL FLOAT
+//=============================================================================//
+##f$hand_Raise_vs_Normal_Float##
+
+
+//=============================================================================//
+// 18- RAISE VS HIGH FLOAT
+//=============================================================================//
+##f$hand_Raise_vs_High_Float##
+
+
+//=============================================================================//
+// 19- RAISE VS OVER FLOAT
+//=============================================================================//
+##f$hand_Raise_vs_Over_Float##
+
+
+//=============================================================================//
+// 20- CALL VS NORMAL FLOAT
+//=============================================================================//
+##f$hand_Call_vs_Normal_Float##
+
+
+//=============================================================================//
+// 21- CALL VS HIGH FLOAT
+//=============================================================================//
+##f$hand_Call_vs_High_Float##
+
+
+//=============================================================================//
+// 22- CALL VS OVER FLOAT
+//=============================================================================//		
+##f$hand_Call_vs_Over_Float##
+
+
+//=============================================================================//
+// 23- RAISE VS NORMAL BET
+//=============================================================================//
+##f$hand_Raise_vs_Normal_Bet##
+
+
+//=============================================================================//
+// 24- RAISE VS HIGH BET
+//=============================================================================//
+##f$hand_Raise_vs_High_Bet##
+
+
+//=============================================================================//
+// 25- RAISE VS OVER BET
+//=============================================================================//
+##f$hand_Raise_vs_Over_Bet##
+
+
+//=============================================================================//
+// 26- CALL VS NORMAL BET
+//=============================================================================//
+##f$hand_Call_vs_Normal_Bet##
+
+
+//=============================================================================//
+// 27- CALL VS HIGH BET
+//=============================================================================//
+##f$hand_Call_vs_High_Bet##
+
+
+//=============================================================================//
+// 28- CALL VS OVER BET
+//=============================================================================//		
+##f$hand_Call_vs_Over_Bet##
+
+	
+//=============================================================================//
+// 29- RAISE VS NORMAL RAISE      //Not Raise vs Bet
+//=============================================================================//
+##f$hand_Raise_vs_Normal_Raise##
+
+
+//=============================================================================//
+// 30- RAISE VS OVER RAISE      //Not Raise vs Bet
+//=============================================================================//
+##f$hand_Raise_vs_Over_Raise##
+
+
+//=============================================================================//
+// 31- CALL VS NORMAL RAISE
+//=============================================================================//	
+##f$hand_Call_vs_Normal_Raise##
+
+
+//=============================================================================//
+// 32- CALL VS OVER RAISE
+//=============================================================================//	
+##f$hand_Call_vs_Over_Raise##
+
+
+//************************************************************************************************************************************** 	
+//                                                       
+//                                                      #04 - POSTFLOP ATTACK
+//
+//**************************************************************************************************************************************
+// 01- FLOP CBET
+// 02- TURN CBET
+// 03- RIVER CBET
+// 04- FLOP FLOAT BET
+// 05- TURN FLOAT BET
+// 06- RIVER FLOAT BET
+// 07- FLOP DONK BET
+// 08- TURN DONK BET
+// 09- RIVER DONK BET
+// 10- TURN PROBE BET
+// 11- RIVER PROBE BET
+// 12- TURN DELAYED BETS
+// 13- RIVER DELAYED BET
+
+//=============================================================================//
+// 01- FLOP CBET
+//=============================================================================//
+##f$hand_flop_cbet##
+
+
+//=============================================================================//
+// 02- TURN CBET
+//=============================================================================//	
+##f$hand_turn_cbet##
+
+
+//=============================================================================//
+// 03- RIVER CBET
+//=============================================================================//
+##f$hand_river_cbet##
+
+
+//=============================================================================//
+// 04- FLOP FLOAT BET  
+//=============================================================================//	
+##f$hand_flop_floatbet##
+
+
+//=============================================================================//
+// 05- TURN FLOAT BET 
+//=============================================================================//
+##f$hand_turn_floatbet##
+
+
+//=============================================================================//
+// 06- RIVER FLOAT BET
+//=============================================================================//
+##f$hand_river_floatbet##
+
+
+//=============================================================================//
+// 07- FLOP DONK BET
+//=============================================================================//
+##f$hand_flop_donkbet##
+
+
+//=============================================================================//
+// 08- TURN DONK BET
+//=============================================================================//
+##f$hand_turn_donkbet##
+
+	
+//=============================================================================//
+// 09- RIVER DONK BET
+//=============================================================================//
+##f$hand_river_donkbet##
+
+
+//=============================================================================//
+// 10- TURN PROBE BET
+//=============================================================================//	
+##f$hand_turn_Probe##
+
+
+//=============================================================================//
+// 11- RIVER PROBE BET
+//=============================================================================//		
+##f$hand_river_Probe##
+
+
+//=============================================================================//
+// 12- TURN DELAYED BETS  
+//=============================================================================//	
+##f$hand_turn_DelayedCB##
+
+	
+##f$hand_turn_Delayed_FloatBet##
+
+
+//=============================================================================//
+// 13- RIVER DELAYED BET  
+//=============================================================================//	
+##f$river_lead_noaction##
+
+
+//************************************************************************************************************************************** 	
+// 
+//                                                     #05 - PREFLOP ACTION
+//                                                                                                                          
+//**************************************************************************************************************************************
+// 01- PREFLOP OPEN RAISE
+// 02- PREFLOP OPEN SHOVE
+// 03- PREFLOP ISO NORMAL
+// 04- PREFLOP ISO SHOVE
+// 05- PREFLOP 3-BET NORMAL
+// 06- PREFLOP 3-BET SHOVE
+// 07- PREFLOP SHOVE v 3BET OR ISO NORMAL
+// 08- PREFLOP SHOVE v 3BET OR ISO OVER
+// 09- PREFLOP SHOVE v OPENSHOVE
+// 10- PREFLOP SHOVE v 4BET or LIMP-RAISE
+// 11- PREFLOP SHOVE BACKUP
+// 12- PREFLOP OPEN LIMP
+// 13- PREFLOP CALL SPR
+// 14- PREFLOP CALL v 3BET OR ISO NORMAL
+// 15- PREFLOP CALL ANY vs LIMP-RAISE - created 20/11/2024
+
+//=============================================================================//
+// 01- PREFLOP OPEN RAISE
+//=============================================================================// 
+##f$preflop_OpenRaise##
+
+	
+//=============================================================================//
+// 02- PREFLOP OPEN SHOVE
+//=============================================================================// 	
+##f$preflop_OpenShove##
+
+	
+//=============================================================================//
+// 03- PREFLOP ISO NORMAL
+//=============================================================================// 
+##f$preflop_ISO_Normal##
+
+	
+//=============================================================================//
+// 04- PREFLOP ISO SHOVE
+//=============================================================================//	
+##f$preflop_ISO_Shove##
+
+	
+//=============================================================================//
+// 05- PREFLOP 3-BET NORMAL
+//=============================================================================// 
+##f$preflop_3bet_Normal##
+
+	
+//=============================================================================//
+// 06- PREFLOP 3-BET SHOVE
+//=============================================================================// 
+##f$preflop_3bet_Shove##
+
+	
+//=============================================================================//
+// 07- PREFLOP SHOVE v 3BET OR ISO NORMAL
+//=============================================================================// 
+##f$preflop_Shove_v_3bet_Or_ISO_Normal##
+
+
+//=============================================================================//
+// 08- PREFLOP SHOVE v 3BET OR ISO OVER
+//=============================================================================// 
+##f$preflop_Shove_v_3bet_Or_ISO_Over##
+
+
+//=============================================================================//
+// 09- PREFLOP SHOVE v OPENSHOVE
+//=============================================================================// 
+##f$preflop_Shove_v_OpenShove##
+
+
+//=============================================================================//
+// 10- PREFLOP SHOVE v 4BET or LIMP-RAISE
+//=============================================================================// 	
+##f$preflop_Shove_v_4bet##
+
+
+//=============================================================================//
+// 11- PREFLOP SHOVE BACKUP
+//=============================================================================// 	
+##f$preflop_Shove_as_Backup##
+
+
+
+//=============================================================================//
+// 12- PREFLOP OPEN LIMP
+//=============================================================================// 
+##f$preflop_OpenLimp##
+
+	
+//=============================================================================//
+// 13- PREFLOP CALL SPR
+//=============================================================================//
+##f$preflop_Call_SRP_or_LP##
+
+
+//=============================================================================//
+// 14- PREFLOP CALL v 3BET OR ISO NORMAL
+//=============================================================================//	
+##f$preflop_Call_v_3bet_Or_ISO_Normal## 
+
+	
+//=============================================================================//
+// 15- PREFLOP CALL ANY vs LIMP-RAISE - created 20/11/2024
+//=============================================================================// 
+##f$preflop_Shove_v_LimpRaise##		
+
+	
+//************************************************************************************************************************************** 	
+// 
+//                                                     #06 - FLOP ACTION
+//                                                                                                                          
+//**************************************************************************************************************************************
+##f$flop_Raise_SRP_Initiative##
+//=============================================================================//
+// Flop Raise Initiative - First - SingleRaised = 3wSBvBB 
+//=============================================================================//
+ [Position = First || Position = Middle] ? {
+// We will c-bet
+    [ f$act_0_nothing_to_Call ] ? f$hand_flop_cbet : 			
+// We will skip our c-bet and check-raise     
+    f$act_1_vs_normalbet ? f$hand_Raise_vs_Normal_Float : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Float :  
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Float :  
+// We will re-raise if our c-bet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Flop Raise Initiative - Last - SingleRaised = HUSB, 3wBTN
+//=============================================================================//
+[Position = Last || Position = Middle]        ? {
+// We will c-bet
+    [ f$act_0_nothing_to_Call ] ? f$hand_flop_cbet : 	
+// We will raise vs donkbet
+    f$act_1_vs_normalbet ? f$hand_Raise_vs_Normal_Donk : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Donk :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Donk :
+// We will re-raise if our c-bet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+0
+
+##f$flop_Call_SRP_Initiative##
+//=============================================================================//
+// Flop Call Initiative - First - SingleRaised = 3wSBvBB
+//=============================================================================//
+ [Position = First || Position = Middle]  ? {
+// We will skip our c-bet and check-call
+    f$act_1_vs_normalbet ? f$hand_Call_vs_Normal_Float :
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Float : 
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Float : 
+// We will call if our c-bet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+	
+//=============================================================================//
+// Flop Call Initiative - Last - SingleRaised = HUSB, 3wBTN
+//=============================================================================//
+ [Position = Last || Position = Middle]   ? {
+// We will call vs donkbets
+    f$act_1_vs_normalbet ? f$hand_Call_vs_Normal_Donk : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Donk :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Donk :
+// We will call if our c-bet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+0
+
+##f$flop_Raise_SRP_Noinitiative##
+//=============================================================================//
+// Flop Raise No-initiative - First - SingleRaised = HUBB, 3wSBvBTN e 3wBBvBTN
+//=============================================================================//
+ [Position = First || Position = Middle]  ? {
+// We will donkbet
+    [ f$act_0_nothing_to_Call ] ? f$hand_flop_donkbet : 	
+// We will check-raise vs c-bet
+    f$act_1_vs_normalbet ? f$hand_flop_Raise_vs_Normal_Cbet : // "vs_Normal_Cbet" we have a function per street.
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Cbet : // "vs_High_Cbet" we have a function for all streets.
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Cbet: // "vs_Over_Cbet" we have a function for all streets.
+// We will re-raise if our donkbet is raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Flop Raise No-initiative - Last - SingleRaised = 3wBBvSB
+//=============================================================================//
+ [Position = Last || Position = Middle]  ? {
+// Villain skiped his c-bet. We will floatbet
+    [ f$act_0_nothing_to_Call ] ? f$hand_flop_floatbet : 
+// We will raise vs c-bet
+    f$act_1_vs_normalbet ? f$hand_flop_Raise_vs_Normal_Cbet :
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Cbet : 
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Cbet :
+// We will re-raise if our floatbet is raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+0
+
+##f$flop_Call_SRP_Noinitiative##
+//=============================================================================//
+// Flop Call No-initiative - First - SingleRaised = HUBB, 3wSBvBTN e 3wBBvBTN
+//=============================================================================//
+ [Position = First || Position = Middle]  ? {
+// We will check-call vs c-bets
+    f$act_1_vs_normalbet ? f$hand_flop_Call_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Cbet :
+// We will re-raise if our donkbet is raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Flop Call No-initiative - Last - SingleRaised = 3wBBvSB
+//=============================================================================//
+ [Position = Last || Position = Middle]  ? {
+// We will call vs c-bets
+    f$act_1_vs_normalbet ? f$hand_flop_Call_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Cbet :
+// We will call if our floatbet is re-raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+0 
+
+##f$flop_Raise_Limped_Initiative##
+//=============================================================================//
+// Flop Raise No-action = 3wSBvBB-limping
+//=============================================================================//  
+ [Position = First || Position = Middle] ? {
+// We will l-cb
+    [ f$act_0_nothing_to_Call ] ? f$hand_flop_cbet : 		
+// We will skip our l-cb and check-raise
+    f$act_1_vs_normalbet ? f$hand_Raise_vs_Normal_Float :  
+    f$act_2_vs_highbet ? f$hand_Raise_vs_Normal_Float : 
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Float : 
+// We will re-raise if our l-cb is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Flop Raise No-action - Last = HUSB-limping, BTNvSB-limping ou BTNvBB-limping
+//=============================================================================//
+[Position = Last || Position = Middle]  ? {
+// We will l-cb
+    [ f$act_0_nothing_to_Call ] ? f$hand_flop_cbet :  
+// We will raise vs l-donk
+    f$act_1_vs_normalbet ? f$hand_Raise_vs_Normal_Donk : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Donk :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Donk :
+// We will re-raise if our l-cb is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+0
+
+##f$flop_Raise_Limped_Noinitiative##
+//=============================================================================//
+// Flop Raise No-action - First = HUBB-vlimp, SBvBTN-limp, BBvBTN-limp ou 3wSBv-2p
+//=============================================================================//  
+ [Position = First || Position = Middle]  ? {
+// We will l-donk
+    [ f$act_0_nothing_to_Call ] ? f$hand_flop_donkbet :			
+// We will raise vs l-cb
+    f$act_1_vs_normalbet ? f$hand_flop_Raise_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Cbet :
+// We will re-raise if our l-donk is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Flop Raise No-action - Last = 3wBBvSB-limp
+//=============================================================================//
+[Position = Last || Position = Middle]  ? {
+// Villain skiped his l-cb. We will l-float
+    [ f$act_0_nothing_to_Call ] ? f$hand_flop_floatbet :	
+// We will raise vs l-cb
+    f$act_1_vs_normalbet ? f$hand_flop_Raise_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Cbet :
+// We will re-raise if our l-float is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+0
+
+##f$flop_Call_Limped_Initiative##
+//=============================================================================//
+// Flop Call No-action - First = 3wSBvBB-limping
+//=============================================================================//  
+ [Position = First || Position = Middle] ? {
+// We will skip our l-cb and check-call
+    f$act_1_vs_normalbet ? f$hand_Call_vs_Normal_Float :  
+    f$act_2_vs_highbet ? f$hand_Call_vs_Normal_Float : 
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Float : 
+// We will call if our l-cb is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Flop Call No-action - Last = HUSB-limping, BTNvSB-limping ou BTNvBB-limping
+//=============================================================================//
+[Position = Last || Position = Middle]  ? {
+// We will call vs l-donk
+    f$act_1_vs_normalbet ? f$hand_Call_vs_Normal_Donk : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Donk :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Donk :
+// We will call if our l-donk is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+0
+
+##f$flop_Call_Limped_Noinitiative##
+//=============================================================================//
+// Flop Call No-action - First = HUBB-vlimp, SBvBTN-limp, BBvBTN-limp ou 3wSBv-2p
+//=============================================================================//  
+ [Position = First || Position = Middle]  ? {
+// We will skip our l-donk and check-call
+    f$act_1_vs_normalbet ? f$hand_flop_Call_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Cbet :
+// We will call if our l-donk is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Flop Call No-action - Last = 3wBBvSB-limp
+//=============================================================================//
+[Position = Last || Position = Middle]  ? {
+// We will call vs l-cb
+    f$act_1_vs_normalbet ? f$hand_flop_Call_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Cbet :
+// We will call if our l-float is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+0
+
+##f$flop_Raise_GotRaised_or_Isolated##
+ [Position = First || Position = Middle]  ? {
+// We will donkbet
+    [ f$act_0_nothing_to_Call ] ? f$hand_flop_donkbet : 	
+// We will check-raise vs c-bet
+    f$act_1_vs_normalbet ? f$hand_flop_Raise_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Cbet :
+// We will re-raise if our donkbet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Flop Raise WeGotRaised Or Isolated - Last - copied No-initiative
+//=============================================================================//
+ [Position = Last || Position = Middle]  ? {
+// Villain skiped his c-bet. We will floatbet
+    [ f$act_0_nothing_to_Call ] ? f$hand_flop_floatbet :
+// We will raise vs c-bet
+    f$act_1_vs_normalbet ? f$hand_flop_Raise_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Cbet :
+// We will re-raise if our floatbet is raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+0
+
+##f$flop_Call_GotRaised_or_Isolated##
+ [Position = First || Position = Middle]  ? {
+// We will check-call vs c-bet
+    f$act_1_vs_normalbet ? f$hand_flop_Call_vs_Normal_Cbet :
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Cbet :
+// We will call if our donkbet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Flop Call WeGotRaised  Or Isolated - Last
+//=============================================================================//
+ [Position = Last || Position = Middle]   ? {
+// We will call vs c-bet
+    f$act_1_vs_normalbet ? f$hand_flop_Call_vs_Normal_Cbet :
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Cbet :
+// We will call if our floatbet is raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+0
+
+//************************************************************************************************************************************** 	
+// 
+//                                                     #07 - TURN ACTION
+//                                                                                                                          
+//**************************************************************************************************************************************
+##f$turn_Raise_Initiative##
+ [Position = First || Position = Middle]  ? {
+// We will c-bet
+    [ f$act_0_nothing_to_Call ] ? f$hand_turn_cbet : 		
+// We will skip our c-bet and check-raise 
+    f$act_1_vs_normalbet ? f$hand_Raise_vs_Normal_Float : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Float :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Float :
+// We will re-raise if our c-bet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Turn Raise Initiative - Last - SRP - ok
+//=============================================================================//
+[Position = Last || Position = Middle]        ? {
+// We will c-bet
+    [ f$act_0_nothing_to_Call ] ? f$hand_turn_cbet : 	 	
+// We will raise vs donkbet
+    f$act_1_vs_normalbet ? f$hand_Raise_vs_Normal_Donk : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Donk :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Donk :
+// We will re-raise if our c-bet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+0
+
+##f$turn_Call_Initiative##
+ [Position = First || Position = Middle]  ? {
+// We will skip our c-bet and check-call
+    f$act_1_vs_normalbet ? f$hand_Call_vs_Normal_Float :
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Float : 
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Float : 
+// We will call if our c-bet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+	
+//=============================================================================//
+// Turn Call Initiative - Last
+//=============================================================================//
+ [Position = Last || Position = Middle]   ? {
+// We will call vs donkbets
+    f$act_1_vs_normalbet ? f$hand_Call_vs_Normal_Donk : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Donk :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Donk :
+// We will call if our c-bet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+0
+
+##f$turn_Raise_Noinitiative##
+ [Position = First || Position = Middle]  ? {
+// We will donkbet
+     [ f$act_0_nothing_to_Call ]  ? f$hand_turn_donkbet :
+// We will check-raise vs c-bet
+    f$act_1_vs_normalbet ? f$hand_turn_Raise_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Cbet :
+// We will re-raise if our donkbet is raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Turn Raise No-initiative - Last
+//=============================================================================//
+[Position = Last || Position = Middle]  ? {
+// Villain skiped his c-bet. We will floatbet
+    [ f$act_0_nothing_to_Call ] ? f$hand_turn_floatbet : 
+// We will raise vs c-bet
+    f$act_1_vs_normalbet ? f$hand_turn_Raise_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Cbet :
+// We will re-raise if our floatbet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+0
+	
+##f$turn_Call_Noinitiative##
+ [Position = First || Position = Middle]  ? {
+// We will check-call vs c-bets
+    f$act_1_vs_normalbet ? f$hand_turn_Call_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Cbet :
+// We will re-raise if our donkbet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Turn Call No-initiative - Last
+//=============================================================================//
+ [Position = Last || Position = Middle]  ? {
+// We will call vs c-bets
+    f$act_1_vs_normalbet ? f$hand_turn_Call_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Cbet :
+// We will call if our floatbet is re-raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+0
+
+##f$turn_Raise_Noaction##
+ [Position = First || Position = Middle]  ? {
+// Bet first in // Nao eh probe caso eu tenha iniciativa no flop, pule a cbet e o vilao tbm check
+// Exemplos de cenarios: 
+// SB OOP ini (x-skipcb) - BB(x-skipfloat) -> SB delayedCB 
+// SB OOP noin(x-skipdonk) - BB(x-skipcb) -> SB Probe 
+// BB(x-skipdonk) - SB INP ini(x-skipcb) -> BB(x-skipprob) - SB DelayedCB 
+// BB(x-skipcb) - SB INP noin (x-skipfloat) -> BB(x-skipdelcb) - SB DEL FLOAT BET! -> This DEL FLOAT BET was missing in the code! 28-02-25
+    [ f$act_0_nothing_to_Call ] ? ((f$hand_turn_DelayedCB && user_Flop_Init_Hero) || (f$hand_turn_Probe && !user_Flop_Init_Hero)) :
+// Raise bets
+    f$act_1_vs_normalbet ? f$hand_Raise_vs_Normal_Bet : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Bet :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Bet :
+// Raise if raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Turn Raise No-action - Last
+//=============================================================================//
+[Position = Last || Position = Middle]  ? {
+// We will delayed bet
+    [ f$act_0_nothing_to_Call ] ? ((f$hand_turn_DelayedCB && user_Flop_Init_Hero) || (f$hand_turn_Delayed_FloatBet && !user_Flop_Init_Hero)) : // Missing DEL FLOAT HERE
+// Raise bets
+    f$act_1_vs_normalbet ? f$hand_Raise_vs_Normal_Bet : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Bet : 
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Bet :
+// Raise if raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+0
+
+##f$turn_Call_Noaction##
+ [Position = First || Position = Middle]  ? {
+// Call bets
+    f$act_1_vs_normalbet ? f$hand_Call_vs_Normal_Bet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Bet : 
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Bet :
+// Call if raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Turn Call No-action - Last
+//=============================================================================//
+ [Position = Last || Position = Middle]  ? {
+// Call Vs bets
+    f$act_1_vs_normalbet ? f$hand_Call_vs_Normal_Bet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Bet : 
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Bet :
+// Call if raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+0
+
+##f$turn_Raise_GotRaised##
+ [Position = First || Position = Middle]  ? {
+// We will donkbet
+     [ f$act_0_nothing_to_Call ]  ? f$hand_turn_donkbet :
+// We will check-raise vs c-bet
+    f$act_1_vs_normalbet ? f$hand_turn_Raise_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Cbet :
+// We will re-raise if our donkbet is raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Turn Raise GotRaised - Last
+//=============================================================================//
+[Position = Last || Position = Middle]  ? {
+// Villain skiped his c-bet. We will floatbet
+    [ f$act_0_nothing_to_Call ] ? f$hand_turn_floatbet : 
+// We will raise vs c-bet
+    f$act_1_vs_normalbet ? f$hand_turn_Raise_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Cbet :
+// We will re-raise if our floatbet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+0
+	
+##f$turn_Call_GotRaised##
+ [Position = First || Position = Middle]  ? {
+// We will check-call vs c-bets
+    f$act_1_vs_normalbet ? f$hand_turn_Call_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Cbet :
+// We will re-raise if our donkbet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+//=============================================================================//
+// Turn Call GotRaised - Last
+//=============================================================================//
+ [Position = Last || Position = Middle]  ? {
+// We will call vs c-bets
+    f$act_1_vs_normalbet ? f$hand_turn_Call_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Cbet :
+// We will call if our floatbet is re-raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+0
+
+//************************************************************************************************************************************** 	
+// 
+//                                                     #08 - RIVER ACTION
+//                                                                                                                          
+//**************************************************************************************************************************************
+##f$river_Raise_Initiative##
+ [Position = First || Position = Middle]  ? {
+// We will c-bet
+    [ f$act_0_nothing_to_Call ] ? f$hand_river_cbet : 		
+// We will skip our c-bet and check-raise     
+    f$act_1_vs_normalbet ? f$hand_Raise_vs_Normal_Float : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Float :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Float :
+// We will re-raise if our c-bet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+//=============================================================================//
+// River Raise Initiative - Last - SRP - ok
+//=============================================================================//
+[Position = Last || Position = Middle]        ? {
+// We will c-bet
+    [ f$act_0_nothing_to_Call ] ? f$hand_river_cbet : 	
+// We will raise vs donkbet
+    f$act_1_vs_normalbet ? f$hand_Raise_vs_Normal_Donk : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Donk :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Donk :
+// We will re-raise if our c-bet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+0
+
+##f$river_Call_Initiative##
+ [Position = First || Position = Middle]  ? {
+// We will skip our c-bet and check-call
+    f$act_1_vs_normalbet ? f$hand_Call_vs_Normal_Float : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Float :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Float :
+// We will call if our c-bet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+//=============================================================================//
+// River Call Initiative - Last
+//=============================================================================//
+ [Position = Last || Position = Middle]   ? {
+// We will call vs donkbets
+    f$act_1_vs_normalbet ? f$hand_Call_vs_Normal_Donk : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Donk :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Donk :
+// We will call if our c-bet is raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+0
+
+##f$river_Raise_Noinitiative##
+ [Position = First || Position = Middle]  ? {
+// We will donkbet
+     [ f$act_0_nothing_to_Call ]  ? f$hand_river_donkbet :
+// We will check-raise vs c-bet
+    f$act_1_vs_normalbet ? f$hand_river_Raise_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Cbet :
+// We will re-raise if our donkbet is raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+//=============================================================================//
+// River Raise No-initiative - Last
+//=============================================================================//
+[Position = Last || Position = Middle]  ? {
+// Villain skiped his c-bet. We will floatbet
+     [ f$act_0_nothing_to_Call ] ? f$hand_river_floatbet :
+// We will raise vs c-bet
+    f$act_1_vs_normalbet ? f$hand_river_Raise_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Cbet :
+// We will re-raise if our floatbet is raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+0
+
+##f$river_Call_Noinitiative##
+ [Position = First || Position = Middle]  ? {
+// We will check-call vs c-bets
+    f$act_1_vs_normalbet ? f$hand_river_Call_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Cbet :
+// We will re-raise if our donkbet is raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+//=============================================================================//
+// River Call No-initiative - Last
+//=============================================================================//
+ [Position = Last || Position = Middle]  ? {
+// We will call vs c-bets
+    f$act_1_vs_normalbet ? f$hand_river_Call_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Cbet :
+// We will call if our floatbet is re-raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+0
+
+##f$river_Raise_noaction##
+ [Position = First || Position = Middle]  ? {
+// Bet first in 
+// Exemplos de cenarios: 
+// SB OOP ini (x-skipcb) - BB(x-skipfloat) -> SB delayedCB 
+// SB OOP noin(x-skipdonk) - BB(x-skipcb) -> SB Probe 
+// BB(x-skipdonk) - SB INP ini(x-skipcb) -> BB(x-skipprob) - SB DelayedCB 
+// BB(x-skipcb) - SB INP noin (x-skipfloat) -> BB(x-skipdelcb) - SB DEL FLOAT BET! -> This DEL FLOAT BET was missing in the code! 28-02-25
+     [ f$act_0_nothing_to_Call ]  ? (!BotCalledOnFlop && (f$river_lead_noaction)) || (BotCalledOnFlop && f$hand_river_Probe)  :
+// Raise bets
+    f$act_1_vs_normalbet ? f$hand_Raise_vs_Normal_Bet : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Bet :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Bet :
+// Raise if raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+//=============================================================================//
+// River Raise No-action - Last
+//=============================================================================//
+[Position = Last || Position = Middle]  ? {
+// We will lead
+     [ f$act_0_nothing_to_Call ] ? (f$river_lead_noaction) :
+// Raise bets
+    f$act_1_vs_normalbet ? f$hand_Raise_vs_Normal_Bet : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_Normal_Bet : // looser noaction
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Bet :
+// Raise if raised
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+0
+
+##f$river_Call_noaction##
+ [Position = First || Position = Middle]  ? {
+// Call bets
+    f$act_1_vs_normalbet ? f$hand_Call_vs_Normal_Bet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Bet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Bet :
+// Call if raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+//=============================================================================//
+// River Call No-action - Last
+//=============================================================================//
+ [Position = Last || Position = Middle]  ? {
+// Call Vs bets
+    f$act_1_vs_normalbet ? f$hand_Call_vs_Normal_Bet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Bet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Bet :
+// Call if raised
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+0
+
+##f$river_Raise_GotRaised##
+ [Position = First || Position = Middle]  ? {
+// We will donkbet
+     [ f$act_0_nothing_to_Call ]  ? f$hand_river_donkbet :
+// We will check-raise vs c-bet
+    f$act_1_vs_normalbet ? f$hand_river_Raise_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Cbet :
+// We will re-raise if our donkbet is raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+//=============================================================================//
+// River Raise WeGotRaised - Last
+//=============================================================================//
+[Position = Last || Position = Middle]  ? {
+// Villain skiped his c-bet. We will floatbet
+     [ f$act_0_nothing_to_Call ] ? f$hand_river_floatbet :
+// We will raise vs c-bet
+    f$act_1_vs_normalbet ? f$hand_river_Raise_vs_Normal_Cbet :
+    f$act_2_vs_highbet ? f$hand_Raise_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Raise_vs_Over_Cbet :
+// We will re-raise if our floatbet is raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Raise_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Raise_vs_Over_Raise : 0 } :
+0
+
+##f$river_Call_GotRaised##
+ [Position = First || Position = Middle]  ? {
+// We will check-call vs c-bets
+    f$act_1_vs_normalbet ? f$hand_river_Call_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Cbet :
+// We will re-raise if our donkbet is raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+//=============================================================================//
+// River Call WeGotRaised - Last
+//=============================================================================//
+ [Position = Last || Position = Middle]  ? {
+// We will call vs c-bets
+    f$act_1_vs_normalbet ? f$hand_river_Call_vs_Normal_Cbet : 
+    f$act_2_vs_highbet ? f$hand_Call_vs_High_Cbet :
+    f$act_3_vs_overbet ? f$hand_Call_vs_Over_Cbet :
+// We will call if our floatbet is re-raised 
+    f$act_4_vs_reraise_Normal ? f$hand_Call_vs_Normal_Raise :
+    f$act_5_vs_reraise_Over ? f$hand_Call_vs_Over_Raise : 0 } :
+0
+
+//************************************************************************************************************************************** 	
+// 
+//                                                      #09 - SCENARIOS
+//                                                                                                                          
+//**************************************************************************************************************************************
+// 01- Preflop Action
+// 02- Postflop Action
+// 03- Position
+// 04- Game Status
+// 05- Hand Strength
+
+//=============================================================================//
+// 01- Preflop Action
+//=============================================================================//
+##f$FirstAction##
+When BotsLastAction = None Return true Force 
+
+##f$UnplayedPot##
+When BotsActionsOnThisRoundIncludingChecks = 0 AND Raises = 0 AND Bets = 0 AND Calls = 0 Return true Force // CommunityDrivenBot
+When (ncallbets<=1 && nopponentscalling<=0) Return true Force // Gecko 
+When IsPreflop && f$game_HUSB && (ncallbets<=1.334 && nopponentscalling<=0) Return true Force // Gecko mod due to delayed blinds error
+
+##f$pot_Limped##
+!RaisesBeforeFlop && !BotRaisedBeforeFlop
+
+##f$pot_Got_Isolated##
+didcallround_preflop >= 2
+
+##f$pot_SingleRaised##
+   (RaisesBeforeFlop && !BotRaisedBeforeFlop && !f$pot_Got_Isolated) 
+|| (!RaisesBeforeFlop && BotRaisedBeforeFlop)
+
+##f$pot_Reraised##
+//RaisesBeforeFlop - True if any opponent raised before the flop  
+When ((didbetsizeround_preflop || didraisround_preflop)  && didcallround_preflop) Return true Force
+When (RaisesBeforeFlop && !didcallround_preflop)  Return true Force
+
+##f$btn_got_Raised_Normal##
+When IsPreflop && (f$inBTN && !f$inSB) && !f$FirstAction && AmountToCall <= 4 && BotsLastAction = Bet  Return true Force
+
+##f$btn_got_Raised_Over##
+When IsPreflop && (f$inBTN && !f$inSB) && !f$FirstAction && AmountToCall > 4 && BotsLastAction = Bet  Return true Force
+
+##f$sb_got_Raised_Normal_2H##
+When IsPreflop && (f$inSB && OpponentsAtTable = 1) && !f$FirstAction && AmountToCall <= 4 && BotsLastAction = Bet Return true Force
+
+##f$sb_got_Raised_Over_2H##
+When IsPreflop && (f$inSB && OpponentsAtTable = 1) && !f$FirstAction && AmountToCall > 4 && BotsLastAction = Bet Return true Force
+
+##f$sb_got_Isolated_Normal_2H##
+When IsPreflop && (f$inSB && OpponentsAtTable = 1) && !f$FirstAction && AmountToCall <= 2.5 && BotsLastAction = Call Set user_GotIsolated
+When IsPreflop && (f$inSB && OpponentsAtTable = 1) && !f$FirstAction && AmountToCall <= 2.5 && BotsLastAction = Call Return true Force
+
+##f$sb_got_Isolated_Over_2H##
+When IsPreflop && (f$inSB && OpponentsAtTable = 1) && !f$FirstAction && AmountToCall > 2.5 && BotsLastAction = Call Set user_GotIsolated
+When IsPreflop && (f$inSB && OpponentsAtTable = 1) && !f$FirstAction && AmountToCall > 2.5 && BotsLastAction = Call Return true Force
+
+##f$sb_vs_Open_Raise_Normal##
+When f$inSB && f$FirstAction && AmountToCall > .9 && AmountToCall <= 2 && !(f$OpponentIsRaisingCommitted && AmountToCall > 1.5) Return true Force
+
+##f$sb_vs_Open_Raise_Over##
+When f$inSB && f$FirstAction && (AmountToCall > 2 || (f$OpponentIsRaisingCommitted && AmountToCall > 1.5) ) Return true Force
+
+##f$sb_got_Limped##
+When f$inSB && Calls > 0 && AmountToCall <= .9 Return true Force
+
+##f$sb_got_Raised_Normal_3H##
+When f$sb_got_LimpRaised_Normal_3H Return false Force
+When IsPreflop && (f$inSB && OpponentsAtTable = 2) && !f$FirstAction && AmountToCall <= 4 && BotsLastAction = Bet Return true Force
+
+##f$sb_got_Raised_Over_3H##
+When f$sb_got_LimpRaised_3H Return false Force
+When IsPreflop && (f$inSB && OpponentsAtTable = 2) && !f$FirstAction && AmountToCall > 4 && BotsLastAction = Bet Return true Force
+
+##f$sb_got_Isolated_Normal_3H##
+When IsPreflop && (f$inSB && OpponentsAtTable = 2) && !f$FirstAction && AmountToCall <= 2.5 && BotsLastAction = Call Set user_GotIsolated
+When IsPreflop && (f$inSB && OpponentsAtTable = 2) && !f$FirstAction && AmountToCall <= 2.5 && BotsLastAction = Call Return true Force
+
+##f$sb_got_Isolated_Over_3H##
+When IsPreflop && (f$inSB && OpponentsAtTable = 2) && !f$FirstAction && AmountToCall > 2.5 && BotsLastAction = Call Set user_GotIsolated
+When IsPreflop && (f$inSB && OpponentsAtTable = 2) && !f$FirstAction && AmountToCall > 2.5 && BotsLastAction = Call Return true Force
+
+##f$sb_got_LimpRaised_Normal_3H##
+//Hero ISO and is facing a normal sized raise from the opp that limped. Hero can call, fold or shove.
+When IsPreflop && (f$inSB && OpponentsAtTable = 2) && !f$FirstAction && AmountToCall <= 5 && BotsLastAction = Bet && Calls = 1 && RaisesSinceLastPlay = 1 
+&& f$dealer_lastcalled && f$dealer_lastraised Return true Force
+
+##f$sb_got_LimpRaised_Over_3H##
+//Hero ISO and is facing a over sized raise from the opp that limped. Hero can shove or fold.
+When IsPreflop && (f$inSB && OpponentsAtTable = 2) && !f$FirstAction && AmountToCall > 5 && BotsLastAction = Bet && Calls = 1 && RaisesSinceLastPlay = 1
+&& f$dealer_lastcalled && f$dealer_lastraised Return true Force
+
+##f$bb_got_LimpRaised_by_BTN_Normal_3H##
+//Hero ISO and is facing a normal sized raise from the opp that limped. Hero can call, fold or shove.
+When IsPreflop && (f$inBB && OpponentsAtTable = 2) && !f$FirstAction && AmountToCall <= 5 && BotsLastAction = Bet && CallsSinceLastPlay = 0 && RaisesSinceLastPlay = 1 
+&& FirstCallerPosition = 2 && f$dealer_lastraised Return true Force
+
+##f$bb_got_LimpRaised_by_SB_Normal_3H##
+//Hero ISO and is facing a normal sized raise from the opp that limped. Hero can call, fold or shove.
+When IsPreflop && (f$inBB && OpponentsAtTable = 2) && !f$FirstAction && AmountToCall <= 5 && BotsLastAction = Bet && CallsSinceLastPlay = 0 && RaisesSinceLastPlay = 1 
+&& f$sb_lastraised_3H Return true Force
+
+##f$bb_got_LimpRaised_by_BTN_Over_3H##
+//Hero ISO and is facing a big sized raise from the opp that limped. Hero can shove or fold.
+When IsPreflop && (f$inBB && OpponentsAtTable = 2) && !f$FirstAction && AmountToCall > 5 && BotsLastAction = Bet && CallsSinceLastPlay = 0 && RaisesSinceLastPlay = 1 
+&& FirstCallerPosition = 2 && f$dealer_lastraised Return true Force
+
+##f$bb_got_LimpRaised_by_SB_Over_3H##
+//Hero ISO and is facing a over sized raise from the opp that limped. Hero can shove or fold.
+When IsPreflop && (f$inBB && OpponentsAtTable = 2) && !f$FirstAction && AmountToCall > 5 && BotsLastAction = Bet && CallsSinceLastPlay = 0 && RaisesSinceLastPlay = 1 
+&& f$sb_lastraised_3H Return true Force
+
+##f$sb_got_LimpRaised_3H##
+f$sb_got_LimpRaised_Normal_3H || f$sb_got_LimpRaised_Over_3H
+
+##f$bb_got_LimpRaised_by_BTN_3H##
+f$bb_got_LimpRaised_by_BTN_Normal_3H || f$bb_got_LimpRaised_by_BTN_Over_3H
+
+##f$bb_got_LimpRaised_by_SB_3H##
+f$bb_got_LimpRaised_by_SB_Normal_3H || f$bb_got_LimpRaised_by_SB_Over_3H
+
+##f$bb_got_LimpRaised_2H##
+IsPreflop && f$game_HUBB && Calls > 0 && f$sb_lastraised_2H 
+
+##f$bb_got_Limped##
+When f$inBB && AmountToCall = 0 && Calls > 0 Return true Force
+
+##f$bb_vs_Open_Raise_Normal##
+When f$inBB && f$FirstAction && AmountToCall > 0 && AmountToCall <= 2 && !(f$OpponentIsRaisingCommitted && AmountToCall > 1) Return true Force
+
+##f$bb_vs_Open_Raise_MNR##
+When f$inBB && f$FirstAction && AmountToCall > 0 && AmountToCall < 1.5 && !(f$OpponentIsRaisingCommitted && AmountToCall > 1) Return true Force
+
+##f$bb_vs_Open_Raise_MID##
+When f$inBB && f$FirstAction && AmountToCall >= 1.5 && AmountToCall <= 3 && !(f$OpponentIsRaisingCommitted && AmountToCall > 1) Return true Force
+
+##f$bb_vs_Open_Raise_4xUp##
+When f$inBB && f$FirstAction && (AmountToCall > 3 || (f$OpponentIsRaisingCommitted && AmountToCall > 1) ) Return true Force
+
+##f$bb_vs_Open_Raise_Over##
+When f$inBB && f$FirstAction && (AmountToCall > 2 || (f$OpponentIsRaisingCommitted && AmountToCall > 1) ) Return true Force
+
+##f$bb_got_4beted##
+When f$bb_got_LimpRaised_2H || f$bb_got_LimpRaised_by_SB_3H || f$bb_got_LimpRaised_by_BTN_Over_3H Return false Force
+When f$inBB && Not f$FirstAction Return true Force
+
+##f$sb_lastraised_2H##
+[ raischair==smallblindchair ] && [ raischair==dealerchair ]
+
+##f$sb_lastraised_3H##
+[ raischair==smallblindchair ] && ![ raischair==dealerchair ]
+
+##f$sb_lastraised_2H_or_3H##
+f$sb_lastraised_2H || f$sb_lastraised_3H  
+
+##f$dealer_lastraised##
+[ raischair==dealerchair ] && ![ raischair==smallblindchair ]
+
+##f$sb_lastcalled_2H##
+[ lastcallerchair==smallblindchair ] && [ lastcallerchair==dealerchair ]
+
+##f$sb_lastcalled_3H##
+[ lastcallerchair==smallblindchair ] && ![ lastcallerchair==dealerchair ]
+
+##f$sb_lastcalled_2H_or_3H##
+f$sb_lastcalled_2H || f$sb_lastcalled_3H 
+
+##f$dealer_lastcalled##
+[ lastcallerchair==dealerchair ] && ![ lastcallerchair==smallblindchair ]
+
+##f$bb_lastraised##
+[ raischair==bigblindchair ]
+
+//=============================================================================//
+// 02- Postflop Action
+//=============================================================================//
+##f$act_0_nothing_to_Call##
+//[ call<=0 ]
+(AmountToCall*bblind)<=0
+
+##f$act_8_vs_verylowbet##
+[ !didbetsize && ((AmountToCall*bblind)>0) && ((AmountToCall*bblind)<=(potcommon*0.35)) && !(f$act_4_vs_reraise_Normal || f$act_5_vs_reraise_Over) ]
+
+##f$act_6_vs_lowbet##
+[ !didbetsize && ((AmountToCall*bblind)>0) && ((AmountToCall*bblind)<=(potcommon*0.52)) && !(f$act_4_vs_reraise_Normal || f$act_5_vs_reraise_Over) ]
+
+##f$act_60_vs_60bet##
+[ !didbetsize && ((AmountToCall*bblind)>0) && ((AmountToCall*bblind)<=(potcommon*0.60)) && !(f$act_4_vs_reraise_Normal || f$act_5_vs_reraise_Over) ]
+
+##f$act_1_vs_normalbet##
+[ !didbetsize && ((AmountToCall*bblind)>0) && ((AmountToCall*bblind)<=(potcommon*0.76)) && !(f$act_4_vs_reraise_Normal || f$act_5_vs_reraise_Over) ]
+
+##f$act_2_vs_highbet##
+[ !didbetsize && ((AmountToCall*bblind)>(potcommon*0.76)) && ((AmountToCall*bblind)<=(potcommon*1.0)) && !(f$act_4_vs_reraise_Normal || f$act_5_vs_reraise_Over) ]
+
+##f$act_3_vs_overbet##
+[ !didbetsize && ((AmountToCall*bblind)>(potcommon*1.0)) && !(f$act_4_vs_reraise_Normal || f$act_5_vs_reraise_Over) ]
+
+##f$act_7_vs_bet_1_to_150##
+[ !didbetsize && ((AmountToCall*bblind)<=(potcommon*1.5)) && !(f$act_4_vs_reraise_Normal || f$act_5_vs_reraise_Over) ]
+
+##f$act_9_vs_bet_150up##
+[ !didbetsize && ((AmountToCall*bblind)>(potcommon*1.5)) && !(f$act_4_vs_reraise_Normal || f$act_5_vs_reraise_Over) ]
+
+##f$act_4_vs_reraise_Normal##
+[ (didbetsize||didcall) && ((AmountToCall*bblind)<=(currentbet*2)) ] ||
+[ (RaisesSinceLastPlay>0) && ((AmountToCall*bblind)<=(currentbet*2)) ]
+
+##f$act_5_vs_reraise_Over##
+[ (didbetsize||didcall) && ((AmountToCall*bblind)>(currentbet*2)) ] ||
+[ (RaisesSinceLastPlay>0) && ((AmountToCall*bblind)>(currentbet*2)) ]
+
+##f$Init_Hero##
+// Can't have initiative preflop: either we did not yet act or somebody raised
+When IsPreflop Return false Force
+When f$Init_GotRaised_Or_Isolated Return false Force
+When didbetsizeround_previousround OR didraisround_previousround Return true Force
+
+##f$Init_Nobody##
+NOT f$Init_Hero && !f$Init_Villain && !f$Init_GotRaised_Or_Isolated
+
+##f$Init_Villain##
+f$Init_GotRaised_Or_Isolated ? 0 :
+IsPreflop && ncallbets > 1 ? 1 :
+IsFlop && (didcallround_previousround && nbetsround_preflop > 1) ? 1 :
+betround > 2 && (didcallround_previousround && nbetsround_previousround > 0) ? 1 :
+0
+
+##f$Init_GotRaised_Or_Isolated_Calc##
+IsFlop && user_GotIsolated ? 1 :
+lastraised_previousround < 0 ? 0 :
+BotsActionsOnThisRoundIncludingChecks > 0 ? 0 :
+(!didbetsizeround_previousround && !didraisround_previousround) ? 0 :
+!didcallround_previousround ? 0 :
+prevaction = 1 ? 1 :
+0
+
+##f$Init_GotRaised_Or_Isolated##
+me_re_Initiativegotraised = 1 ? 1 :
+f$Init_GotRaised_Or_Isolated_Calc && me_st_Initiativegotraised_1 >= 0 ? 1 :
+0
+
+##f$Init_Villain_Limped##
+When f$pot_Limped
+	When (Position = First) && (f$game_HUBB || f$game_3wBBvBTN || f$game_3wSBvBTN || f$game_3wSBv2p) Return true Force
+	When (Position = Last || Position = Middle) && (f$game_3wBBvSB || f$game_3wBBv2p) Return true Force
+
+##f$Init_Hero_Limped##
+When f$pot_Limped
+	When (Position = First) && (f$game_3wSBvBB) Return true Force
+	When (Position = Last || Position = Middle) && (f$game_HUSB || f$game_3wBTN) Return true Force
+
+//=============================================================================//
+// 03- Position
+//=============================================================================//
+##f$InButton_backup##
+(currentbet = 0 && IsPreflop && f$FirstAction && OpponentsAtTable = 2)
+
+##f$InSmallBlind_backup##
+(currentbet = sblind && IsPreflop && f$FirstAction)
+
+##f$InBigBlind_backup##
+(currentbet = bblind && IsPreflop && f$FirstAction)
+
+##f$inBB##
+(InBigBlind || f$InBigBlind_backup)
+
+##f$inSB##
+(InSmallBlind || f$InSmallBlind_backup) && !f$inBB // add !InBB to f$InSB
+
+##f$inBTN##
+(InButton || (f$FirstAction && currentbet = 0))
+
+##f$game_HUSB##
+OpponentsAtTable = 1 && f$inSB //1
+
+##f$game_HUBB##
+OpponentsAtTable = 1 && f$inBB //2
+
+##f$game_3wBTNvSB##
+f$inBTN && OpponentsAtTable = 2 && (headsupchair == smallblindchair) //3
+
+##f$game_3wBTNvBB##
+f$inBTN && OpponentsAtTable = 2 && (headsupchair == bigblindchair) //4
+
+##f$game_3wBTNv2p##
+f$inBTN && OpponentsAtTable = 2 && (headsupchair == -1) //5
+
+##f$game_3wSBvBTN##
+f$inSB && OpponentsAtTable = 2 && (headsupchair == dealerchair) // bb folded //6
+
+##f$game_3wSBvBB##
+f$inSB && OpponentsAtTable = 2 && (headsupchair == bigblindchair) //7
+
+##f$game_3wSBv2p##
+f$inSB && OpponentsAtTable = 2 && (headsupchair == -1) //8
+
+##f$game_3wBBvBTN##
+f$inBB && OpponentsAtTable = 2 && (headsupchair == dealerchair) && !(headsupchair == smallblindchair) //9
+
+##f$game_3wBBvSB##
+f$inBB && OpponentsAtTable = 2 && (headsupchair == smallblindchair) //10
+
+##f$game_3wBBv2p##
+f$inBB && OpponentsAtTable = 2 && (headsupchair == -1) //11
+
+##f$game_3wBlinds_vBTN##
+(f$inBB || f$inSB) && OpponentsAtTable = 2 && (headsupchair == -1) 
+
+##f$game_3wBTN##
+f$game_3wBTNvBB || f$game_3wBTNvSB || f$game_3wBTNv2p
+
+##f$game_AgainstTwo##
+((Raises + Calls) > 1 || nopponentsallin > 1)
+
+//=============================================================================//
+// 04- Game Status
+//=============================================================================//
+##f$TheBiggestActiveOpponentsChips##
+balance_bigstackchair + currentbet_bigstackchair
+
+##f$TheBiggestActiveOpponentsStack##
+When bblind <= 0 Return -1 Force
+When Others Return f$TheBiggestActiveOpponentsChips / bblind Force
+
+##f$EffectiveStack##
+//f$EffectiveStack renamed
+When bblind <= 0 Return -1 Force
+When (balance + currentbet) < f$TheBiggestActiveOpponentsChips Return (balance + currentbet) / bblind Force
+When Others Return f$TheBiggestActiveOpponentsStack Force
+
+##f$ChipsInGame##
+potcommon + balance0 + balance1 + balance2 + currentbet0 + currentbet + currentbet2
+
+##f$WrongPot##
+When pot != potcommon+potplayer Return true Force
+
+##f$OpponentIsRaisingCommitted##
+When OpponentIsAllin Return true Force
+When (Raises > 0 || Bets > 0) && BetSize > StackSize_raischair Return true Force
+When HandIsHeadsup && (Raises > 0 || Bets > 0) && BetSize > StackSize*0.5 Return true Force
+
+##f$StackBehind##
+When StackSize >= (AmountToCall + StackSize_raischair) Return (AmountToCall + StackSize_raischair) Force
+When StackSize < (AmountToCall + StackSize_raischair) Return StackSize Force
+
+##f$Odds_and_Outs##
+IsFlop ? (f$OutOdds*2.0)>f$PotOdds :
+IsTurn ? (f$OutOdds*1.2)>f$PotOdds : 0
+
+##f$OutOdds##
+// Equity
+[ f$calc_Outs/46 ]
+
+##f$PotOdds##
+[call / (EffectivePotSizeInDollars + call + f$ImpliedOdds)]
+    
+##f$ImpliedOdds##
+f$OpponentIsRaisingCommitted ? 0 :
+IsFlop ? ((nopponentsbetting*.50)*bet4*1.5) + (((nplayersplaying-1-nopponentsbetting)*.275)*bet4*1.25) : 
+IsTurn ? ((nopponentsbetting*.50)*bet4) + (((nplayersplaying-1-nopponentsbetting)*.275)*bet4) : 0
+
+##f$calc_Outs##
+//HUBB CF Q1 Draws 03-03-2025
+When f$draw_FD_2OC Return 11 Force
+When f$draw_OESD_2OC_or_FD_1OC Return 10 Force
+When f$draw_OESD_1OC_or_FD_or_OESD_2mOC Return 9 Force
+When f$draw_OESD_UC Return 8 Force
+When f$draw_GS_1OC Return 6 Force
+When Others Return NOuts Force
+
+//=============================================================================//
+// 05- Hand Strength
+//=============================================================================//
+##f$draw_GS_1OC##
+//6 outs 24% to river max call 6bbs //HUBB CF Q1 Draws 03-03-2025
+When f$hand_Gutshot && Overcards = 1 Return true Force
+
+##f$draw_OESD_UC##
+//8 outs 32% to river max call 10bbs //HUBB CF Q1 Draws 03-03-2025
+f$hand_SD && Overcards = 0 && !f$hand_mOC_or_better_over
+
+##f$draw_OESD_1OC_or_FD_or_OESD_2mOC##
+//9 outs 36% to river max call 13bbs //HUBB CF Q1 Draws 03-03-2025
+When f$hand_SD && Overcards = 1 Return true Force
+When f$hand_FD  && Overcards = 0 && !f$hand_mOC_or_better_over Return true Force
+When f$hand_SD && f$hand_2mOC Return true Force
+
+##f$draw_OESD_2OC_or_FD_1OC##
+//10 outs 40% to river max call 18bbs //HUBB CF Q1 Draws 03-03-2025
+When f$hand_SD && Overcards = 2 Return true Force
+When f$hand_FD && Overcards = 1 Return true Force
+
+##f$draw_FD_2OC##
+//11 outs 44% to river max call 27bbs //HUBB CF Q1 Draws 03-03-2025
+When f$hand_FD && Overcards = 2 Return true Force
+
+##f$hand_2mOC##
+(rankloplayer > SecondTopFlopCard) && !ispair
+
+##f$hand_mOC_or_better_over##
+When IndividualOvercardsOnBoard <= 1 Return true Force
+When Overcards > 0 Return true Force
+
+##f$hand_Gutshot_or_BetterDraw##
+When IsRiver Return false Force
+When f$hand_SD Return true Force
+When f$hand_Gutshot Return true Force
+When f$hand_FD Return true Force
+When Overcards = 2 && (HaveBackdoorFlushDraw || HaveBackdoorStraightDraw) Return true Force
+When IsFlop && (hand$A || hand$K) && Overcards >= 1 && (HaveBackdoorFlushDraw || HaveBackdoorStraightDraw) Return true Force //2024
+
+##f$hand_FD##
+   (HaveFlushDraw && SuitsInHand = 1) 
+|| f$QueenHighContributingToOnlyOneCardFlushDraw 
+
+##f$hand_SD##
+   ( HaveStraightDraw && (nstraightfillcommon - nstraightfill = 2) )
+|| HaveNutStraightDraw
+
+##f$hand_Flush##
+   (HaveFlush && SuitsInHand = 1 && nsuitedcommon = 3) 
+|| f$QueenHighContributingToOnlyOneCardFlush 
+
+##f$hand_Straight##
+HaveStraight
+
+##f$hand_2HC_Straight##
+   ( HaveStraight && (nstraightfillcommon - nstraightfill = 2) )
+   
+##f$hand_2HC_Flush##
+   (HaveFlush && SuitsInHand = 1 && nsuitedcommon = 3) 
+   
+##f$hand_1HC_Straight##
+HaveStraight && !f$hand_2HC_Straight
+   
+##f$hand_1HC_Flush##
+HaveFlush && !f$hand_2HC_Flush
+
+##f$hand_1HC_King_Flush##
+f$hand_1HC_Flush && f$KingHighContributingToOnlyOneCardFlush
+
+##f$hand_1HC_Nine_Flush##
+f$hand_1HC_Flush && f$NineHighContributingToOnlyOneCardFlush
+
+##f$hand_Gutshot##
+   ( HaveInsideStraightDraw && (nstraightfillcommon - nstraightfill = 2) )
+|| HaveNutStraightDraw
+
+##f$NoMadeHand##
+!HavePair && !f$hand_OverPairOrBetter
+
+##f$hand_Air_or_JustGutShot##
+(f$hand_Air || (f$hand_Gutshot && f$NoMadeHand)) && !f$hand_mOC_or_better_over
+
+##f$hand_Gutshot_NoOvercard##
+( HaveInsideStraightDraw && (nstraightfillcommon - nstraightfill = 2) ) && Overcards = 0 
+
+##f$hand_AnyPair##
+f$hand_5thTopPair_or_Pocket
+|| f$hand_4thTopPair_or_Pocket
+|| f$hand_3rdTopPair_or_Pocket
+|| f$hand_2ndTopPair_or_Pocket
+|| (f$hand_TopPairOrBetter && !f$hand_TripsOrBetter)
+
+##f$hand_MPBP##
+f$hand_5thTopPair_or_Pocket
+|| f$hand_4thTopPair_or_Pocket
+|| f$hand_3rdTopPair_or_Pocket
+|| f$hand_2ndTopPair_or_Pocket
+
+##f$hand_PairOrBetter##
+   (HavePair
+OR HaveTwoPair
+OR HaveSet
+OR HaveTrips
+OR f$hand_Straight
+OR f$hand_Flush
+OR HaveFullHouse
+OR HaveQuads
+OR HaveStraightFlush)
+
+##f$hand_OverPairOrBetter##
+   (HaveOverPair
+OR HaveTwoPair
+OR HaveSet
+OR HaveTrips
+OR f$hand_Straight
+OR f$hand_Flush
+OR HaveFullHouse
+OR HaveQuads
+OR HaveStraightFlush)
+
+##f$hand_TwoPairsOrBetter##
+   (HaveTwoPair
+OR HaveSet
+OR HaveTrips
+OR f$hand_Straight
+OR f$hand_Flush
+OR HaveFullHouse
+OR HaveQuads
+OR HaveStraightFlush)
+
+##f$hand_TripsOrBetter##
+     (HaveTrips
+OR HaveSet
+OR f$hand_Straight
+OR f$hand_Flush
+OR HaveFullHouse
+OR HaveQuads
+OR HaveStraightFlush)
+
+##f$hand_StraightOrBetter##
+     (f$hand_Straight
+OR f$hand_Flush
+OR HaveFullHouse
+OR HaveQuads
+OR HaveStraightFlush)
+
+##f$HaveOverNonBoardPairedPocketPair##
+[(betround >= flop) AND (ispair AND (rankhiplayer > HighestUnpairedBoardCard))]
+
+##f$hand_TopPairOrBetter##
+((HaveTopNonBoardPairedPair || f$HaveOverNonBoardPairedPocketPair) || f$hand_OverPairOrBetter)
+
+##f$hand_TPGKOrBetter##
+( ((HaveTopNonBoardPairedPair || f$HaveOverNonBoardPairedPocketPair) && f$NumberOfBetterKickers <= 3)  || f$hand_OverPairOrBetter)
+
+##f$hand_TopPair2ndKickerOrBetter##
+( ((HaveTopNonBoardPairedPair || f$HaveOverNonBoardPairedPocketPair) && f$NumberOfBetterKickers <= 1)  || f$hand_OverPairOrBetter)
+
+##f$hand_JustTopPair##
+f$hand_TopPairOrBetter && !f$hand_OverPairOrBetter
+
+##f$hand_HighStrongFD##
+f$hand_FD && (hand$A || hand$K || hand$Q)
+
+##f$HaveStraightOrBetter##
+     (HaveStraight
+OR HaveFlush
+OR HaveFullHouse
+OR HaveQuads
+OR HaveStraightFlush)
+
+##f$HaveFlushOrBetter##
+     (HaveFlush
+OR HaveFullHouse
+OR HaveQuads
+OR HaveStraightFlush)
+
+##f$HaveOneCardStraightNotUnder##
+HaveStraight && !(nstraightfillcommon - nstraightfill = 2) && !HaveUnderStraight
+
+##f$JackHighContributingToOnlyOneCardFlushDraw##
+When HaveFlushDraw && SuitsInHand = 2
+		When tsuitcommon = 0 && (hand$Ah || hand$Kh || hand$Qh || hand$Jh) Return true Force
+		When tsuitcommon = 1 && (hand$Ad || hand$Kd || hand$Qd || hand$Jd) Return true Force
+		When tsuitcommon = 2 && (hand$Ac || hand$Kc || hand$Qc || hand$Jc) Return true Force
+		When tsuitcommon = 3 && (hand$As || hand$Ks || hand$Qs || hand$Js) Return true Force
+		When HaveFlushDraw AND (NumberOfUnknownSuitedOvercards <= 3) Return true Force //Accept Ten if K on board, for example.
+
+##f$QueenHighContributingToOnlyOneCardFlushDraw##
+When HaveFlushDraw && SuitsInHand = 2
+		When tsuitcommon = 0 && (hand$Ah || hand$Kh || hand$Qh) Return true Force
+		When tsuitcommon = 1 && (hand$Ad || hand$Kd || hand$Qd) Return true Force
+		When tsuitcommon = 2 && (hand$Ac || hand$Kc || hand$Qc) Return true Force
+		When tsuitcommon = 3 && (hand$As || hand$Ks || hand$Qs) Return true Force
+		When HaveFlushDraw AND (NumberOfUnknownSuitedOvercards <= 2) Return true Force
+		
+##f$QueenHighContributingToOnlyOneCardFlush##
+When HaveFlush && nsuitedcommon > 3
+		When tsuitcommon = 0 && (hand$Ah || hand$Kh || hand$Qh) Return true Force
+		When tsuitcommon = 1 && (hand$Ad || hand$Kd || hand$Qd) Return true Force
+		When tsuitcommon = 2 && (hand$Ac || hand$Kc || hand$Qc) Return true Force
+		When tsuitcommon = 3 && (hand$As || hand$Ks || hand$Qs) Return true Force
+		When HaveFlush AND (NumberOfUnknownSuitedOvercards <= 2) Return true Force
+		
+##f$KingHighContributingToOnlyOneCardFlush##
+When HaveFlush && nsuitedcommon > 3
+		When tsuitcommon = 0 && (hand$Ah || hand$Kh) Return true Force
+		When tsuitcommon = 1 && (hand$Ad || hand$Kd) Return true Force
+		When tsuitcommon = 2 && (hand$Ac || hand$Kc) Return true Force
+		When tsuitcommon = 3 && (hand$As || hand$Ks) Return true Force
+		When HaveFlush AND (NumberOfUnknownSuitedOvercards <= 1) Return true Force
+		
+##f$AceHighContributingOnlyOneCardFlushDraw##
+WHEN (nsuited != 4) RETURN false FORCE	
+WHEN (nsuitedcommon != 3) RETURN false FORCE
+WHEN (NumberOfUnknownSuitedOvercards <= 0) RETURN true FORCE
+		
+##f$NineHighContributingToOnlyOneCardFlush##
+When HaveFlush && SuitsInHand = 2
+		When tsuitcommon = 0 && (hand$Ah || hand$Kh || hand$Qh || hand$Jh || hand$Th || hand$9h) Return true Force
+		When tsuitcommon = 1 && (hand$Ad || hand$Kd || hand$Qd || hand$Jd || hand$Td || hand$9d) Return true Force
+		When tsuitcommon = 2 && (hand$Ac || hand$Kc || hand$Qc || hand$Jc || hand$Tc || hand$9c) Return true Force
+		When tsuitcommon = 3 && (hand$As || hand$Ks || hand$Qs || hand$Js || hand$Ts || hand$9s) Return true Force
+
+##f$NineToQueenContributingToOnlyOneCardFlush##
+When HaveFlush && SuitsInHand = 2
+		When tsuitcommon = 0 && (hand$Qh || hand$Jh || hand$Th || hand$9h) Return true Force
+		When tsuitcommon = 1 && (hand$Qd || hand$Jd || hand$Td || hand$9d) Return true Force
+		When tsuitcommon = 2 && (hand$Qc || hand$Jc || hand$Tc || hand$9c) Return true Force
+		When tsuitcommon = 3 && (hand$Qs || hand$Js || hand$Ts || hand$9s) Return true Force
+		
+##f$LowMiddleCardContributingToOnlyOneCardFlush##
+HaveFlush && SuitsInHand = 2 && !f$NineHighContributingToOnlyOneCardFlush
+
+##f$hand_2ndTopPair_low##
+f$hand_2ndTopPair_or_Pocket && (SecondBestBoardCard <= 7 || (ispair && rankhiplayer <= 7)) && !(HaveTopNonBoardPairedPair || f$HaveOverNonBoardPairedPocketPair) && !f$hand_OverPairOrBetter 
+
+##f$hand_2ndTopPair_high##
+f$hand_2ndTopPair_or_Pocket && (SecondBestBoardCard >= 8 || (ispair && rankhiplayer >= 8)) && !(HaveTopNonBoardPairedPair || f$HaveOverNonBoardPairedPocketPair) && !f$hand_OverPairOrBetter 
+
+##f$hand_BP_low##
+HavePair && ThirdFlopCard <= 7 && !f$hand_2ndTopPair_or_Pocket && !(HaveTopNonBoardPairedPair || f$HaveOverNonBoardPairedPocketPair) && !f$hand_OverPairOrBetter 
+
+##f$hand_BP_high##
+HavePair && ThirdFlopCard >= 8 && !f$hand_2ndTopPair_or_Pocket && !(HaveTopNonBoardPairedPair || f$HaveOverNonBoardPairedPocketPair) && !f$hand_OverPairOrBetter 
+
+##f$hand_SD_or_FD##
+!IsRiver && (f$hand_SD || f$hand_FD) 
+
+##f$hand_ComboDraw##
+f$hand_SD && f$hand_FD 
+
+##f$hand_Air##
+(!f$hand_Gutshot_or_BetterDraw && f$NoMadeHand)
+|| (f$game_3wBTNvSB && f$NoMadeHand && !f$hand_StackOffDraws)
+
+##f$hand_TPWK_or_WorstPair##
+	(HaveTopNonBoardPairedPair && f$NumberOfBetterKickers > 3 && !f$hand_OverPairOrBetter)
+||  (HavePair && !HaveTopNonBoardPairedPair && !f$hand_OverPairOrBetter)
+
+##f$hand_TPWK##
+	(HaveTopNonBoardPairedPair && f$NumberOfBetterKickers > 3 && !f$hand_OverPairOrBetter)
+	
+##f$hand_2ndTopPair_or_Pocket##
+(f$HaveSecondTopNonBoardPairedPair && !f$hand_TopPairOrBetter) || (ispair && IndividualOvercardsOnBoard = 1) 
+
+##f$hand_3rdTopPair_or_Pocket##
+(f$HaveThirdTopNonBoardPairedPair && !f$HaveSecondTopNonBoardPairedPair && !f$hand_TopPairOrBetter) || (ispair && IndividualOvercardsOnBoard = 2)
+
+##f$hand_4thTopPair_or_Pocket##
+(f$HaveFourthTopNonBoardPairedPair && !f$HaveThirdTopNonBoardPairedPair && !f$HaveSecondTopNonBoardPairedPair && !f$hand_TopPairOrBetter) || (ispair && IndividualOvercardsOnBoard = 3)
+
+##f$hand_5thTopPair_or_Pocket##
+(f$HaveFifthTopNonBoardPairedPair && !f$HaveFourthTopNonBoardPairedPair && !f$HaveThirdTopNonBoardPairedPair && !f$HaveSecondTopNonBoardPairedPair && !f$hand_TopPairOrBetter) || (ispair && IndividualOvercardsOnBoard = 4)
+
+##f$hand_3rdTopPair_or_Pocket_or_Worst##
+f$hand_3rdTopPair_or_Pocket || f$hand_4thTopPair_or_Pocket || f$hand_5thTopPair_or_Pocket || HaveUnderPair
+ 
+##f$HaveSecondTopNonBoardPairedPair##
+When HaveSecondTopPair Return true Force
+When RankOfTopPairOnBoard > ThirdBestBoardCard
+When HaveThirdTopPair Return true Force
+
+##f$HaveThirdTopNonBoardPairedPair##
+When HaveThirdTopPair Return true Force
+When RankOfTopPairOnBoard > FourthBestBoardCard
+When HaveFourthTopPair Return true Force
+
+##f$HaveFourthTopNonBoardPairedPair##
+When HaveFourthTopPair Return true Force
+When RankOfTopPairOnBoard > FifthBestBoardCard
+When HaveFifthTopPair Return true Force
+	
+##f$HaveFifthTopNonBoardPairedPair##
+When HaveFifthTopPair Return true Force
+
+##f$hand_StackOffDraws##
+When Overcards >= 1 && HaveStraightDraw Return true Force //1OC + 1/2HC OESD
+When Overcards >= 1 && (HaveFlushDraw && SuitsInHand = 1) Return true Force // 1OC + 2HC FD
+When f$AceHighContributingOnlyOneCardFlushDraw Return true Force // NUT 1HD FD
+
+//*******************************
+// KICKER FUNCTIONS 
+//******************************* 
+// https://www.maxinmontreal.com/forums/viewtopic.php?t=18062&hilit=kicker&start=30
+##f$MadeHandFifthCardRank##
+// Useful for the determination of kickers
+// The last 20 bits of pokerval encode the ranks of our made hand
+// Four bits per card
+(pokerval >> 0) & 0x0F
+
+##f$PairRank##
+WHEN NOT HavePair RETURN false FORCE
+WHEN HaveTopPair RETURN TopPairRank FORCE
+WHEN HaveSecondTopPair RETURN SecondTopPairRank FORCE
+WHEN HaveThirdTopPair RETURN ThirdTopPairRank FORCE
+WHEN HaveFourthTopPair RETURN FourthTopPairRank FORCE
+WHEN HaveFifthTopPair RETURN FifthTopPairRank FORCE
+
+##f$BestHoleCardRank##
+RankOfFirstHoleCard > RankOfSecondHoleCard ? RankOfFirstHoleCard : RankOfSecondHoleCard
+
+##f$SecondBestHoleCardRank##
+RankOfFirstHoleCard < RankOfSecondHoleCard ? RankOfFirstHoleCard : RankOfSecondHoleCard
+
+##f$BestNonPairedHoleCardRank##
+WHEN f$BestHoleCardRank = f$PairRank RETURN f$SecondBestHoleCardRank FORCE
+WHEN Others RETURN f$BestHoleCardRank FORCE
+
+##f$MyKicker##
+// Correction because when we do not have at least onepair, we have a high card, not kicker.
+// WHEN f$BestNonPairedHoleCardRank >= f$MadeHandFifthCardRank RETURN f$BestNonPairedHoleCardRank FORCE
+// WHEN Others RETURN f$MadeHandFifthCardRank FORCE
+
+WHEN (isfourofakind OR istwopair OR isthreeofakind OR isonepair)
+   WHEN f$BestNonPairedHoleCardRank >= f$MadeHandFifthCardRank RETURN f$BestNonPairedHoleCardRank FORCE
+   WHEN Others RETURN f$MadeHandFifthCardRank FORCE
+WHEN Others
+   WHEN Others RETURN f$ERROR_You_Dont_Have_Any_Kicker FORCE
+
+##f$ERROR_You_Dont_Have_Any_Kicker##
+0
+
+##f$NumberOfBetterKickers##
+// Cards better than my kicker...
+[(ace - f$MyKicker)
+// ...minus the cards in my 5-card-hand which are better than my kicker
+// (We have to shift the kicker out of rankbitspoker, therefore +1)
+// http://www.maxinmontreal.com/forums/viewtopic.php?f=156&t=17922
+- (`(rankbitspoker >> (f$MyKicker + 1)))]
+
+##f$HaveBestKicker##
+(f$NumberOfBetterKickers == 0)
+
+##f$HaveSecondBestKicker##
+(f$NumberOfBetterKickers == 1)
+
+##f$HaveThirdBestKicker##
+(f$NumberOfBetterKickers == 2)
+
+##f$HaveBestKickerOrBetter##
+(f$HaveBestKicker OR HavePair OR HaveOverPairOrBetter)
+
+##f$HaveSecondBestKickerOrBetter##
+f$HaveSecondBestKicker OR f$HaveBestKickerOrBetter
+
+##f$HaveThirdBestKickerOrBetter##
+f$HaveThirdBestKicker OR f$HaveSecondBestKickerOrBetter
+
+//************************************************************************************************************************************** 	
+// 
+//                                                      #10 - HANDLISTS
+//                                                                                                                          
+//************************************************************************************************************************************** 
+//
+
+//************************************************************************************************************************************** 	
+// 
+//                                                      #11 - BETSIZES
+//                                                                                                                          
+//************************************************************************************************************************************** 
+##f$BestBetsize##
+// always 4bet or squeeze allin postflop
+When AmountToCall > 0 && currentbet > 0 && IsPostflop && !IsPreflop && ((IsFlop && f$flop_Call) || (IsTurn && f$turn_Call) || (IsRiver && f$river_Call)) BetMax Force
+
+// allin when calling more then 60% of our stack 
+When AmountToCall > StackSize*0.55 && !IsPreflop && ((IsFlop && f$flop_Call) || (IsTurn && f$turn_Call) || (IsRiver && f$river_Call)) BetMax Force
+
+// allin when villain bet more than 60% of his stack
+When AmountToCall > 0 && HandIsHeadsup && (BetSize+StackSize_raischair)*0.40 > StackSize_raischair && !IsPreflop && ((IsFlop && f$flop_Call) || (IsTurn && f$turn_Call) || (IsRiver && f$river_Call)) BetMax Force
+
+When IsPreflop Return f$BetsizePreflop Force
+When HandIsHeadsup
+   When IsFlop  Return f$BetsizeFlopHeadsup  Force
+   When IsTurn  Return f$BetsizeTurnHeadsup  Force
+   When IsRiver Return f$BetsizeRiverHeadsup Force
+When Others
+   When IsFlop  Return f$BetsizeFlopMultiway  Force
+   When IsTurn  Return f$BetsizeTurnMultiway  Force
+   When IsRiver Return f$BetsizeRiverMultiway Force
+   When Others BetHalfPot Force
+
+##f$BetsizePreflop##
+	When f$UnplayedPot
+		When Others BetMin Force 
+		
+	When f$sb_vs_Open_Raise_Normal || f$sb_got_Limped
+		When f$EffectiveStack > 20 RaiseTo (AmountToCall + 4) Force
+        When f$EffectiveStack > 16 RaiseTo (AmountToCall + 3.5) Force
+		When Others RaiseTo (AmountToCall + 3) Force
+		
+	When f$bb_vs_Open_Raise_Normal 
+		When f$dealer_lastraised && f$EffectiveStack > 20 RaiseTo (AmountToCall + 5.5) Force 
+		When f$sb_lastraised_2H_or_3H && f$EffectiveStack > 20 RaiseTo (AmountToCall + 6) Force
+		When Others RaiseTo (AmountToCall + 4) Force
+		
+	When f$bb_got_Limped
+		When f$EffectiveStack > 16 RaiseTo (Calls + 2) Force
+		When Others RaiseTo (Calls + 1.5) Force
+		
+	When Others
+		When Others BetMax Force
+   
+##f$BetsizeFlopHeadsup##
+When AmountToCall > 0 BetHalfPot Force
+When PotSize <= 3 BetHalfPot Force
+When Others BetThirdPot Force
+
+##f$BetsizeTurnHeadsup##
+	When Others BetHalfPot Force
+
+##f$BetsizeRiverHeadsup##
+	When PotSize <= 3 BetHalfPot Force
+	When AmountToCall > 0 BetHalfPot Force
+	When Others BetThreeFourthPot Force
+
+##f$BetsizeFlopMultiway##
+When AmountToCall = 0 && user_Flop33 && PotSize > 3 BetThirdPot Force
+When AmountToCall = 0 && user_Flop50 BetHalfPot Force
+When AmountToCall = 0 && user_Flop75 BetThreeFourthPot Force
+When AmountToCall = 0 && user_Flop100 BetPot Force
+When AmountToCall = 0 && PotSize > 3 BetThirdPot Force
+When AmountToCall > 0 BetHalfPot Force
+When PotSize <= 3 BetHalfPot Force
+When Others BetThirdPot Force
+
+##f$BetsizeTurnMultiway##
+When AmountToCall = 0 && PotSize > 3 BetThirdPot Force
+When AmountToCall > 0 BetHalfPot Force
+When PotSize <= 3 BetHalfPot Force
+When Others BetThirdPot Force
+
+##f$BetsizeRiverMultiway##
+When AmountToCall = 0 && f$Init_Nobody BetHalfPot Force
+When AmountToCall = 0 BetThreeFourthPot Force
+When AmountToCall > 0 BetHalfPot Force
+When PotSize <= 3 BetHalfPot Force
+When Others BetThirdPot Force
+
+//************************************************************************************************************************************** 	
+// 
+//						             	T H E  G L O R I O U S  E N D 
+//						              =================================
+//************************************************************************************************************************************** 
+

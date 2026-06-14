@@ -68,6 +68,9 @@ namespace G5.Logic
         }
 
         private ActionSizingContext _lastActionSizingContext;
+        private readonly PostFlopLineHistory _executionLineHistory = new PostFlopLineHistory();
+        private readonly LineContextClassifier _executionLineClassifier = new LineContextClassifier();
+        private string _lastExecutionSizingReason = "";
 
 // Options
 private bool _randomlySampleActions;
@@ -380,6 +383,7 @@ public string getPreFlopChartsInfo()
             _numBets = 0;
             _numCallers = 0;
             _bettors = new List<Position>();
+            _executionLineHistory.ResetForNewHand();
 
             if (sittingOutPlayers == null)
                 sittingOutPlayers = new List<int>();
@@ -676,6 +680,75 @@ public string getPreFlopChartsInfo()
             return _lastActionSizingContext;
         }
 
+        private void observeExecutionLineContext(ActionType actionType)
+        {
+            if (_executionLineHistory == null || _executionLineClassifier == null)
+                return;
+
+            try
+            {
+                _executionLineHistory.EnsureStreet(_street);
+
+                PostFlopLineContext context = null;
+
+                if (_street != Street.PreFlop)
+                    context = _executionLineClassifier.Classify(this, actionType, _executionLineHistory);
+
+                _executionLineHistory.ObserveAction(this, actionType, context);
+            }
+            catch
+            {
+                // A classificacao topologica nunca deve quebrar a maquina de estados.
+                // Se houver inconsistencia transitoria, a arvore e o range update continuam usando os caminhos ja existentes.
+            }
+        }
+
+        private PostFlopLineContext classifyPlannedHeroExecutionLine(ActionType plannedAction, int plannedAmount)
+        {
+            if (_street == Street.PreFlop)
+                return null;
+
+            ActionSizingContext previousSizing = _lastActionSizingContext;
+
+            try
+            {
+                captureActionSizingContext(plannedAction, plannedAmount, plannedAmount >= getHero().Stack);
+                _executionLineHistory.EnsureStreet(_street);
+                return _executionLineClassifier.Classify(this, plannedAction, _executionLineHistory);
+            }
+            catch
+            {
+                return new PostFlopLineContext
+                {
+                    Street = _street,
+                    ObservedAction = plannedAction,
+                    ActorIndex = _playerToActInd,
+                    HeroIndex = _heroInd,
+                    ActorIsHero = _playerToActInd == _heroInd,
+                    ActorInPosition = _playerToActInd >= 0 ? isPlayerInPosition(_playerToActInd) : false,
+                    FacingBet = getAmountToCall() > 0,
+                    IsMultiway = numActivePlayers() >= 3,
+                    NumActivePlayers = numActivePlayers(),
+                    NumBetsThisStreetBeforeAction = getNumBets(),
+                    SizeClass = plannedAmount >= getHero().Stack ? PostFlopSizeClass.AllIn : PostFlopSizeClass.Normal,
+                    BoardTexture = BoardTextureClass.Unknown,
+                    BetToPotRatio = previousSizing.BetToPotRatio,
+                    CallToPotRatio = previousSizing.CallToPotRatio,
+                    StackCommitment = previousSizing.StackCommitment,
+                    Spr = previousSizing.SprBeforeAction,
+                    PotBeforeAction = potSize(),
+                    AmountToCall = getAmountToCall(),
+                    ActionAmount = plannedAmount,
+                    LineClass = getAmountToCall() > 0 ? PostFlopLineClass.GenericRaise : PostFlopLineClass.GenericBet,
+                    Reason = "fallback: classificador topologico indisponivel"
+                };
+            }
+            finally
+            {
+                _lastActionSizingContext = previousSizing;
+            }
+        }
+
         public Player getPlayerToAct()
         {
             return _players[_playerToActInd];
@@ -877,6 +950,7 @@ public string getPreFlopChartsInfo()
             // Set other parameters
             goToFirstPlayer();
             _street = _street + 1;
+            _executionLineHistory.EnsureStreet(_street);
             _numBets = 0;
             _bettors = new List<Position>();
            _numCallers = 0;
@@ -976,6 +1050,7 @@ public string getPreFlopChartsInfo()
                 // while the sizing context records full stack commitment.
                 captureActionSizingContext(ActionType.Call, amountToCall, true);
                 _actionEstimator.newAction(ActionType.Call, this);
+                observeExecutionLineContext(ActionType.Call);
 
                 getPlayerToAct().GoesAllIn();
                 actionType = ActionType.AllIn;
@@ -986,6 +1061,7 @@ public string getPreFlopChartsInfo()
                 // Important that this is before player state changes (getPlayerToAct().Calls(...))
                 captureActionSizingContext(ActionType.Call, amountToCall, false);
                 _actionEstimator.newAction(ActionType.Call, this);
+                observeExecutionLineContext(ActionType.Call);
 
                 getPlayerToAct().Calls(amountToCall);
                 actionType = ActionType.Call;
@@ -996,6 +1072,7 @@ public string getPreFlopChartsInfo()
                 // Important that this is before player state changes (getPlayerToAct().Checks())
                 captureActionSizingContext(ActionType.Check, 0, false);
                 _actionEstimator.newAction(ActionType.Check, this);
+                observeExecutionLineContext(ActionType.Check);
 
                 getPlayerToAct().Checks();
                 actionType = ActionType.Check;
@@ -1034,6 +1111,7 @@ public string getPreFlopChartsInfo()
                 // Important that this is before player state changes (getPlayerToAct().GoesAllIn())
                 captureActionSizingContext(ActionType.AllIn, amount, true);
                 _actionEstimator.newAction(ActionType.AllIn, this);
+                observeExecutionLineContext(ActionType.AllIn);
 
                 getPlayerToAct().GoesAllIn();
                 actionType = ActionType.AllIn;
@@ -1043,6 +1121,7 @@ public string getPreFlopChartsInfo()
                 // Important that this is before player state changes (getPlayerToAct().BetsOrRaisesTo(...))
                 captureActionSizingContext(betOrRaise, amount, false);
                 _actionEstimator.newAction(betOrRaise, this);
+                observeExecutionLineContext(betOrRaise);
 
                 getPlayerToAct().BetsOrRaisesTo(getPlayerToAct().MoneyInPot + amount);
                 actionType = betOrRaise;
@@ -1068,6 +1147,7 @@ public string getPreFlopChartsInfo()
             //Console.WriteLine(getPlayerToAct().Name + " folds");
             captureActionSizingContext(ActionType.Fold, 0, false);
             _actionEstimator.newAction(ActionType.Fold, this);
+            observeExecutionLineContext(ActionType.Fold);
             _currentHand.addAction(_street, getPlayerToAct().Name, ActionType.Fold, 0);
 
             getPlayerToAct().Folds();
@@ -1080,6 +1160,7 @@ public string getPreFlopChartsInfo()
             int amount = getPlayerToAct().Stack;
             captureActionSizingContext(ActionType.AllIn, amount, true);
             _actionEstimator.newAction(ActionType.AllIn, this);
+            observeExecutionLineContext(ActionType.AllIn);
             _currentHand.addAction(_street, getPlayerToAct().Name, ActionType.AllIn, amount);
 
             getPlayerToAct().GoesAllIn();
@@ -1243,53 +1324,23 @@ public string getPreFlopChartsInfo()
 
         private int calculatePostFlopBetRaiseAmount(float checkCallEV, float betRaiseEV)
         {
-            int amountToCall = getAmountToCall();
-            int pot = potSize();
-            int stack = _players[_heroInd].Stack;
-
-            if (stack <= 0)
-                return 0;
+            _lastExecutionSizingReason = "";
 
             if (_street == Street.PreFlop)
                 return getRaiseAmount();
 
-            float edge = betRaiseEV - checkCallEV;
-            float wetness = calculateBoardWetnessForSizing();
-            HandStrength handStrength = HandStrength.calculateHandStrength(_heroHoleCards, _board);
-            bool hasStrongMadeHand = handStrength.rank >= HandRank.TwoPair;
-            bool hasWeakShowdown = handStrength.rank <= HandRank.HighCard;
+            int canonicalTreeAmount = getRaiseAmount();
+            ActionType plannedAction = getAmountToCall() > 0 ? ActionType.Raise : ActionType.Bet;
+            PostFlopLineContext context = classifyPlannedHeroExecutionLine(plannedAction, canonicalTreeAmount);
 
-            int sizingBase = Math.Max(1, pot + amountToCall);
-            float fraction;
+            ExecutionSizingResult sizing = ExecutionSizingPolicy.CalculatePostFlopAmount(
+                this,
+                context,
+                canonicalTreeAmount,
+                plannedAction);
 
-            if (amountToCall == 0)
-            {
-                if (hasStrongMadeHand && wetness >= 0.35f)
-                    fraction = 0.75f;
-                else if (hasStrongMadeHand)
-                    fraction = 0.60f;
-                else if (hasWeakShowdown && edge > 0.0f)
-                    fraction = 0.33f;
-                else if (wetness >= 0.45f)
-                    fraction = 0.55f;
-                else
-                    fraction = 0.45f;
-            }
-            else
-            {
-                if (hasStrongMadeHand && wetness >= 0.35f)
-                    fraction = 0.95f;
-                else if (hasStrongMadeHand)
-                    fraction = 0.80f;
-                else if (edge > amountToCall)
-                    fraction = 0.75f;
-                else
-                    fraction = 0.60f;
-            }
-
-            int amount = amountToCall + (int)Math.Round(sizingBase * fraction);
-
-            return clampBetAmount(amount);
+            _lastExecutionSizingReason = sizing.Reason;
+            return clampBetAmount(sizing.Amount);
         }
 
 
@@ -1321,10 +1372,10 @@ public string getPreFlopChartsInfo()
             int effectivePot = Math.Max(1, pot + amountToCall);
             float spr = stack / (float)effectivePot;
 
-            // O FastEV é uma aproximação de uma street. Jam só entra como candidato
-            // natural quando o SPR já está baixo, ou quando o call já compromete o
-            // balance restante. Em SPR alto, all-in exige árvore futura/ranges de
-            // call muito mais precisos e não deve competir como size comum.
+            // O FastEV Ã© uma aproximaÃ§Ã£o de uma street. Jam sÃ³ entra como candidato
+            // natural quando o SPR jÃ¡ estÃ¡ baixo, ou quando o call jÃ¡ compromete o
+            // balance restante. Em SPR alto, all-in exige Ã¡rvore futura/ranges de
+            // call muito mais precisos e nÃ£o deve competir como size comum.
             if (spr <= _maxSprForAllInCandidate)
                 return true;
 
@@ -1747,154 +1798,9 @@ public string getPreFlopChartsInfo()
 
         public BotDecision calculateHeroFastPostFlopAction(double ohEquity, string equitySource)
         {
-            int nOfOpponents = numActivePlayers() - 1;
-            int amountToCall = getAmountToCall();
-            int pot = potSize();
-            int stack = getHero().Stack;
-            bool facingBet = amountToCall > 0;
-
-            DateTime startTime = DateTime.Now;
-
-            BotDecision bd = new BotDecision
-            {
-                actionType = facingBet ? ActionType.Fold : ActionType.Check,
-                byAmount = 0,
-                checkCallEV = 0.0f,
-                betRaiseEV = float.NegativeInfinity,
-                timeSpentSeconds = 0,
-                message = "",
-                usedMultiSizeEV = false,
-                sizingReport = ""
-            };
-
-            if (_street == Street.PreFlop)
-            {
-                bd.message = "FastPostFlopEV chamado no preflop; retornando NoAction.";
-                bd.actionType = ActionType.NoAction;
-                return bd;
-            }
-
-            if (!_fastPostFlopEVEnabled)
-            {
-                bd.message = "FastPostFlopEV desativado por configuracao runtime.";
-                bd.actionType = ActionType.NoAction;
-                return bd;
-            }
-
-            if (_playerToActInd != _heroInd)
-            {
-                bd.actionType = ActionType.NoAction;
-                bd.message = "Player to act is not hero";
-                return bd;
-            }
-
-            if (nOfOpponents <= 0)
-            {
-                bd.actionType = ActionType.Check;
-                bd.message = "FastPostFlopEV: nenhum oponente ativo.";
-                return bd;
-            }
-
-            float heroEquity = Clamp01((float)ohEquity);
-            float realization = estimateFastEquityRealization(nOfOpponents, facingBet);
-
-            float checkCallEV;
-
-            if (facingBet)
-            {
-                float realizedEquity = Clamp01(heroEquity * realization);
-                int potAfterCall = pot + amountToCall;
-                checkCallEV = (realizedEquity * potAfterCall) - amountToCall;
-            }
-            else
-            {
-                checkCallEV = heroEquity * pot * realization;
-            }
-
-            bd.checkCallEV = checkCallEV;
-
-            StringBuilder report = new StringBuilder();
-            report.AppendLine(" -> FastPostFlopEV ativado: OH fornece equity; G5 calcula EV leve por acao/size.");
-            report.AppendLine($"    equitySource={equitySource}, equityOH={heroEquity:P2}, realization={realization:P1}, pot={pot}, amountToCall={amountToCall}, stack={stack}, opponents={nOfOpponents}.");
-            report.AppendLine($"    EV_{(facingBet ? "call" : "check")}={checkCallEV:F3}; EV_fold=0.000.");
-
-            float bestBetRaiseEV = float.NegativeInfinity;
-            int bestAmount = 0;
-
-            if (canHeroBetRaiseNow())
-            {
-                List<int> candidates = buildPostFlopBetRaiseCandidates();
-
-                foreach (int candidate in candidates)
-                {
-                    string candidateReport;
-                    float candidateEV = estimateFastBetRaiseEV(candidate, heroEquity, out candidateReport);
-                    report.AppendLine(candidateReport);
-
-                    if (candidateEV > bestBetRaiseEV)
-                    {
-                        bestBetRaiseEV = candidateEV;
-                        bestAmount = candidate;
-                    }
-                }
-            }
-
-            bd.betRaiseEV = float.IsNegativeInfinity(bestBetRaiseEV) ? -999999.0f : bestBetRaiseEV;
-            bd.sizingReport = report.ToString();
-            bd.usedMultiSizeEV = bestAmount > 0;
-
-            if (facingBet)
-            {
-                if (bestAmount > 0 && bestBetRaiseEV > Math.Max(0.0f, checkCallEV))
-                {
-                    bd.actionType = ActionType.Raise;
-                    bd.byAmount = bestAmount;
-                    bd.message += " -> FastPostFlopEV: raise escolhido por maior EV liquido.\n";
-                }
-                else if (checkCallEV >= 0.0f)
-                {
-                    bd.actionType = ActionType.Call;
-                    bd.byAmount = amountToCall;
-                    bd.message += " -> FastPostFlopEV: call escolhido por EV liquido nao-negativo e superior ao raise.\n";
-                }
-                else
-                {
-                    bd.actionType = ActionType.Fold;
-                    bd.byAmount = 0;
-                    bd.message += " -> FastPostFlopEV: fold escolhido; call e raise possuem EV inferior a fold.\n";
-                }
-            }
-            else
-            {
-                if (bestAmount > 0 && bestBetRaiseEV > checkCallEV)
-                {
-                    bd.actionType = ActionType.Bet;
-                    bd.byAmount = bestAmount;
-                    bd.message += " -> FastPostFlopEV: bet escolhido por maior EV liquido.\n";
-                }
-                else
-                {
-                    bd.actionType = ActionType.Check;
-                    bd.byAmount = 0;
-                    bd.message += " -> FastPostFlopEV: check escolhido; nenhum size superou EV_check.\n";
-                }
-            }
-
-            if ((bd.actionType == ActionType.Bet || bd.actionType == ActionType.Raise) &&
-                IsAtLeastAllInCommitmentThreshold(bd.byAmount, stack))
-            {
-                bd.message += $" -> FastPostFlopEV: amount >= {_allInCommitmentPercent}% do stack; convertendo para all-in.\n";
-                bd.byAmount = stack;
-                bd.actionType = ActionType.AllIn;
-            }
-
-            bd.timeSpentSeconds = (DateTime.Now - startTime).TotalSeconds;
-
-            // O relatório detalhado fica apenas em sizingReport.
-            // appendAcademicDecisionDiagnostics já imprime sizingReport uma única vez.
-            appendAcademicDecisionDiagnostics(ref bd, amountToCall, nOfOpponents);
-            bd.message = bd.message.Trim();
-
+            BotDecision bd = calculateHeroAction();
+            bd.message = ("FastPostFlopEV depreciado: decisao gerada pela arvore completa canonica. " + bd.message).Trim();
+            bd.usedMultiSizeEV = false;
             return bd;
         }
 
@@ -2140,57 +2046,11 @@ private BotDecision calculateHeroFlopHeuristicAction(int amountToCall, int nOfOp
 
         private bool tryEvaluatePostFlopMultiSizeEV(ref BotDecision bd)
         {
-            if (_street == Street.PreFlop)
-                return false;
-
-            if (!canHeroBetRaiseNow())
-                return false;
-
-            var sizingEstimator = _actionEstimator as Estimators.IBetRaiseAmountEstimator;
-            if (sizingEstimator == null)
-                return false;
-
-            List<int> candidates = buildPostFlopBetRaiseCandidates();
-            if (candidates.Count == 0)
-                return false;
-
-            float bestBetRaiseEV = float.NegativeInfinity;
-            float bestCheckCallEV = bd.checkCallEV;
-            int bestAmount = 0;
-            StringBuilder report = new StringBuilder();
-
-            report.Append(" -> Multi-size EV tree ativada. Candidatos: ");
-            report.Append(string.Join(", ", candidates));
-            report.Append(".\n");
-
-            foreach (int amount in candidates)
-            {
-                float candidateCheckCallEV;
-                float candidateBetRaiseEV;
-
-                sizingEstimator.estimateEVForBetRaiseAmount(out candidateCheckCallEV, out candidateBetRaiseEV, this, amount);
-
-                report.Append($"    size={amount}: ccEV={candidateCheckCallEV:F2}, brEV={candidateBetRaiseEV:F2}\n");
-
-                if (bestAmount == 0 || candidateBetRaiseEV > bestBetRaiseEV)
-                {
-                    bestAmount = amount;
-                    bestBetRaiseEV = candidateBetRaiseEV;
-                    bestCheckCallEV = candidateCheckCallEV;
-                }
-            }
-
-            if (bestAmount <= 0 || float.IsNegativeInfinity(bestBetRaiseEV))
-                return false;
-
-            bd.checkCallEV = bestCheckCallEV;
-            bd.betRaiseEV = bestBetRaiseEV;
-            bd.byAmount = bestAmount;
-            bd.usedMultiSizeEV = true;
-            bd.sizingReport = report.ToString();
-            bd.message += report.ToString();
-
-            return true;
+            // Fase canonical-tree: o avaliador multi-size fica explicitamente depreciado.
+            // A arvore calcula apenas a acao abstrata Bet/Raise usando o size canonico nativo
+            // de DecisionMaking.GameState.getRaiseAmount(). O size real e definido depois,
+            // pela ExecutionSizingPolicy, sem reavaliar EV para tamanhos alternativos.
+            return false;
         }
 
         private static string fmtPts(int value)
@@ -2384,8 +2244,8 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
 
             bd.actionType = pfcActionDistribution.sample(_rng);
 
-            // Fast path: a chart é a política preflop. Estes campos são scores
-            // informativos da chart; não disparam DecisionMaking.EstimateEV.
+            // Fast path: a chart Ã© a polÃ­tica preflop. Estes campos sÃ£o scores
+            // informativos da chart; nÃ£o disparam DecisionMaking.EstimateEV.
             bd.checkCallEV = pfcActionDistribution.ccProb;
             bd.betRaiseEV = pfcActionDistribution.brProb + pfcActionDistribution.allinProb;
 
@@ -2488,23 +2348,9 @@ if (_street == Street.PreFlop)
         return chartDecision;
 }
 
-if (_street == Street.Flop)
-{
-    bd = calculateHeroFlopHeuristicAction(amountToCall, nOfOpponents);
-    bd.timeSpentSeconds = (DateTime.Now - startTime).TotalSeconds;
-
-    if (IsAtLeastAllInCommitmentThreshold(bd.byAmount, _players[_heroInd].Stack))
-    {
-        bd.message += $" -> But amount to put in pot is at least {_allInCommitmentPercent}% of player's stack, so go all in!\n";
-        bd.byAmount = _players[_heroInd].Stack;
-        bd.actionType = ActionType.AllIn;
-    }
-
-    appendAcademicDecisionDiagnostics(ref bd, amountToCall, nOfOpponents);
-    bd.message = bd.message.Trim();
-
-    return bd;
-}
+// Pos-flop: a decisao volta a ser sempre da arvore completa canonica.
+// O antigo atalho heuristico de flop foi mantido no arquivo apenas como fallback legado,
+// mas nao participa mais do pipeline principal.
 
 // If we are post flop with many opponents than its too time consumming to calculate.
 if (nOfOpponents < 4 || _street == Street.PreFlop)
@@ -2518,9 +2364,9 @@ if (nOfOpponents < 4 || _street == Street.PreFlop)
                 bd.betRaiseEV = -10.0f;
             }
 
-if (_street > Street.Flop && nOfOpponents < 4)
+if (_street != Street.PreFlop)
 {
-    tryEvaluatePostFlopMultiSizeEV(ref bd);
+    bd.message += " -> Arvore canonica pos-flop: EV calculado sem FastPostFlopEV e sem reavaliacao multi-size.\n";
 }
 
             // Try to read preflop charts
@@ -2612,9 +2458,19 @@ if (_numBets == 0 && _numCallers > 0)
             else // its raise
             {
                 if (bd.byAmount <= 0)
+                {
+                    int canonicalTreeAmount = getRaiseAmount();
                     bd.byAmount = calculatePostFlopBetRaiseAmount(bd.checkCallEV, bd.betRaiseEV);
+
+                    if (_street != Street.PreFlop)
+                    {
+                        bd.message += $" -> ExecutionSizingPolicy: arvore avaliou size canonico {canonicalTreeAmount}; execucao escolheu {bd.byAmount}. {_lastExecutionSizingReason}\n";
+                    }
+                }
                 else if (bd.usedMultiSizeEV)
-                    bd.message += $" -> Melhor sizing por EV multi-size: {bd.byAmount}.\n";
+                {
+                    bd.message += $" -> AVISO: usedMultiSizeEV estava ativo, mas esta fase deprecia multi-size; mantendo byAmount={bd.byAmount}.\n";
+                }
             }
 
             if (IsAtLeastAllInCommitmentThreshold(bd.byAmount, _players[_heroInd].Stack))

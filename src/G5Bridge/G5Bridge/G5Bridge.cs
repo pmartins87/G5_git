@@ -743,7 +743,7 @@ private static bool _handSyncFailed = false;
                 _runtimeMaxSprForAllInCandidate);
 
             DLog($"[RuntimeConfig] LogCompleto={_runtimeLogCompleto}, LogRangesCompletos={_runtimeLogRangesCompletos}, " +
-                $"FastPostFlopEV={_runtimeFastPostFlopEVEnabled}, AllInCommitment={_runtimeAllowAllInByCommitment}, " +
+                $"FastPostFlopEV(depreciado)={_runtimeFastPostFlopEVEnabled}, AllInCommitment={_runtimeAllowAllInByCommitment}, " +
                 $"CommitmentPercent={_runtimeAllInCommitmentPercent}, HighSPRJamCandidate={_runtimeAllowHighSprAllInCandidate}, " +
                 $"MaxSPRJam={_runtimeMaxSprForAllInCandidate:F2}.");
         }
@@ -1393,25 +1393,22 @@ if (_handSyncFailed || _streetSyncFailed)
                 }
                 else
                 {
-                    if (!_runtimeFastPostFlopEVEnabled)
+                    double enhancedEquity;
+                    string enhancedReason;
+
+                    if (TryGetFreshOHEquity(out enhancedEquity, out enhancedReason))
                     {
-                        Log("[GetDecision] FastPostFlopEV desativado por G5cash.txt. Retornando actionType=-1 para fallback da user.dll.");
-                        Log("------------------------------------------------");
-                        return result;
+                        DLog($"[GetDecision] EnhancedPrWin disponivel antes da arvore: equityOH={enhancedEquity:P2}. " +
+                             "Uso correto: snapshot/equity floor; decisao abstrata pela arvore canonica completa.");
+                    }
+                    else
+                    {
+                        DLog($"[GetDecision] EnhancedPrWin ainda nao disponivel antes da arvore: {enhancedReason}. " +
+                             "A arvore canonica completa sera chamada; o OH Equity Floor so sera aplicado se houver snapshot fresco depois.");
                     }
 
-                    double equity;
-                    string equityReason;
-
-                    if (!TryGetFreshOHEquity(out equity, out equityReason))
-                    {
-                        Log($"[GetDecision] FastPostFlopEV bloqueado: equity OH indisponivel/invalida. Motivo={equityReason}. Retornando actionType=-1 para fallback da user.dll.");
-                        Log("------------------------------------------------");
-                        return result;
-                    }
-
-                    DLog($"[GetDecision] Chamando _gameState.calculateHeroFastPostFlopAction() com equityOH={equity:P2}...");
-                    d = _gameState.calculateHeroFastPostFlopAction(equity, "OH EnhancedPrWin");
+                    DLog("[GetDecision] FastPostFlopEV depreciado; chamando arvore completa canonica em _gameState.calculateHeroAction()...");
+                    d = _gameState.calculateHeroAction();
                 }
 
                 result.actionType = (int)d.actionType;

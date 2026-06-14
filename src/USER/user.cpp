@@ -1093,8 +1093,9 @@ static DecisionResult BuildPostFlopDecisionFromEnhancedPrWin(int ohStreet)
     }
 
     // A partir daqui o OH ja calculou equity com EnhancedPrWin e o snapshot
-    // ja foi enviado para a G5Bridge. A decisao estrategica passa a ser do
-    // G5 FastPostFlopEV: OH = motor rapido de equity; G5 = motor leve de EV.
+    // ja foi enviado para a G5Bridge. A decisao estrategica passa a ser da
+    // arvore canonica completa do G5. O EnhancedPrWin permanece como fonte
+    // rapida de equity/snapshot, mas nao escolhe size e nao substitui a arvore.
     DecisionResult g5Decision = SafeGetDecision();
 
     if (g5Decision.actionType >= ACT_FOLD && g5Decision.actionType <= ACT_ALLIN)
@@ -1114,7 +1115,7 @@ static DecisionResult BuildPostFlopDecisionFromEnhancedPrWin(int ohStreet)
                 g5Decision.byAmount = raiseToTotal;
         }
 
-        WriteLog("[user.cpp] OH EnhancedPrWin confirmado; decisao delegada ao G5 FastPostFlopEV: %s amount=$%.2f ccEV=%.3f brEV=%.3f.\n",
+        WriteLog("[user.cpp] OH EnhancedPrWin confirmado; decisao delegada ao G5 arvore canonica: %s amount=$%.2f ccEV=%.3f brEV=%.3f.\n",
             ActionName(g5Decision.actionType),
             g5Decision.byAmount / 100.0,
             g5Decision.checkCallEV,
@@ -1123,7 +1124,7 @@ static DecisionResult BuildPostFlopDecisionFromEnhancedPrWin(int ohStreet)
         return g5Decision;
     }
 
-    WriteLog("[user.cpp] G5 FastPostFlopEV nao retornou decisao valida; usando fallback OH local. actionType=%d.\n",
+    WriteLog("[user.cpp] G5 arvore canonica nao retornou decisao valida; usando fallback OH local. actionType=%d.\n",
         g5Decision.actionType);
 
     double potAfterCall = (double)potBeforeCall + (double)amountToCall;
@@ -2173,7 +2174,7 @@ else
 
     if (IsPostFlopStreet(ohStreet))
         decisionOrigin = g_lastPostFlopDecisionUsedEnhancedPrWin
-            ? "G5 FastPostFlopEV com OH EnhancedPrWin confirmado"
+            ? "G5 arvore canonica com OH EnhancedPrWin confirmado"
             : "OH EnhancedPrWin nao confirmado";
 
     WriteLog("[user.cpp] user.dll decidiu: %s (amount=$%.2f | ccEV=%.2f brEV=%.2f | origem=%s) -> %.0f\n",
