@@ -188,11 +188,11 @@ typedef void(__stdcall* FN_SetOHEquitySnapshot)(
 typedef void(__stdcall* FN_SetRuntimeConfig)(
     int logCompleto,
     int logRangesCompletos,
-    int fastPostFlopEVEnabled,
+    int legacyPostFlopModeIgnored,
     int allowAllInByCommitment,
     int allInCommitmentPercent,
-    int allowHighSprAllInCandidate,
-    double maxSprForAllInCandidate);
+    int legacyAllInCandidateIgnored,
+    double legacyMaxSprIgnored);
 
 static HINSTANCE         hBridge = NULL;
 static FN_NewHand        pNewHand = nullptr;
@@ -481,11 +481,8 @@ static void SendRuntimeConfigToBridge()
 
     int logCompleto = ReadOHConfigInt("f$G5_LogCompleto", 0, 0, 1);
     int logRangesCompletos = ReadOHConfigInt("f$G5_LogRangesCompletos", 0, 0, 1);
-    int fastPostFlopEVEnabled = ReadOHConfigInt("f$G5_FastPostFlopEV", 1, 0, 1);
     int allowAllInByCommitment = ReadOHConfigInt("f$G5_AllInPorCommitment", 1, 0, 1);
     int allInCommitmentPercent = ReadOHConfigInt("f$G5_AllInCommitmentPercent", 66, 1, 100);
-    int allowHighSprAllInCandidate = ReadOHConfigInt("f$G5_FastEV_AllInCandidatoSPRAlto", 0, 0, 1);
-    double maxSprForAllInCandidate = ReadOHConfigDouble("f$G5_FastEV_MaxSPRParaAllInCandidato", 1.25, 0.01, 20.0);
 
     g_runtimeAllInCommitmentPercent = allInCommitmentPercent;
 
@@ -494,11 +491,11 @@ static void SendRuntimeConfigToBridge()
         pSetRuntimeConfig(
             logCompleto,
             logRangesCompletos,
-            fastPostFlopEVEnabled,
+            0,
             allowAllInByCommitment,
             allInCommitmentPercent,
-            allowHighSprAllInCandidate,
-            maxSprForAllInCandidate);
+            0,
+            0.0);
     }
     __except (1)
     {

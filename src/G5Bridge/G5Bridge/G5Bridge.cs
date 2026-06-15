@@ -118,7 +118,10 @@ private static bool _handSyncFailed = false;
 
         private static bool MostrarRangesCompletos()
         {
-            if (_runtimeLogCompleto || _runtimeLogRangesCompletos)
+            // LogCompleto ativa mensagens diagnosticas, mas NAO deve despejar 1326 combos
+            // por range no caminho critico do OpenHoldem. Range completo so com a chave
+            // especifica f$G5_LogRangesCompletos ou variavel de ambiente propria.
+            if (_runtimeLogRangesCompletos)
                 return true;
 
             if (mostrarRangesCompletos)

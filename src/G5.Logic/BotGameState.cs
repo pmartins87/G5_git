@@ -2044,6 +2044,96 @@ private BotDecision calculateHeroFlopHeuristicAction(int amountToCall, int nOfOp
     return bd;
 }
 
+        private bool shouldUseSynchronousCanonicalTreePostFlop(int nOfOpponents)
+        {
+            if (_street == Street.PreFlop)
+                return true;
+
+            // A arvore completa nativa ainda e util academicamente, mas nao pode ser chamada
+            // no caminho sincronico do OpenHoldem quando o branching explode. O log mostrou
+            // travamento no flop multiway antes de qualquer DECISAO retornar.
+            if (_street == Street.Flop)
+                return false;
+
+            // Em multiway, mesmo turn/river podem gerar arvore muito grande por ranges e
+            // respostas encadeadas. Mantemos a arvore canonica sincronica apenas em HU.
+            return nOfOpponents == 1;
+        }
+
+        private BotDecision calculateHeroRuntimeSafePostFlopAction(int amountToCall, int nOfOpponents, string reason)
+        {
+            BotDecision bd;
+
+            if (_street == Street.Flop)
+            {
+                bd = calculateHeroFlopHeuristicAction(amountToCall, nOfOpponents);
+                bd.message = $" -> RuntimeSafePostFlop: {reason}. Flop usa avaliador topologico bounded para nao bloquear o OH; sem FastEV multi-size.\n" + bd.message;
+                return bd;
+            }
+
+            HandStrength handStrength = HandStrength.calculateHandStrength(_heroHoleCards, _board);
+            bool strongMadeHand = handStrength.rank >= HandRank.TwoPair;
+            bool madeHand = handStrength.rank > HandRank.HighCard;
+            int pot = potSize();
+            float potOdds = amountToCall > 0
+                ? amountToCall / (float)Math.Max(1, pot + amountToCall)
+                : 0.0f;
+            bool cheapCall = amountToCall > 0 && potOdds <= 0.20f;
+
+            bd = new BotDecision
+            {
+                actionType = ActionType.Check,
+                byAmount = 0,
+                checkCallEV = 0.0f,
+                betRaiseEV = 0.0f,
+                timeSpentSeconds = 0,
+                message = $" -> RuntimeSafePostFlop: {reason}. Turn/River multiway usa avaliador bounded para nao bloquear o OH; sem FastEV multi-size.\n",
+                usedMultiSizeEV = false,
+                sizingReport = ""
+            };
+
+            if (amountToCall > 0)
+            {
+                bd.byAmount = amountToCall;
+
+                if (strongMadeHand || (madeHand && cheapCall))
+                {
+                    bd.actionType = ActionType.Call;
+                    bd.checkCallEV = Math.Max(0.1f, pot * 0.20f);
+                    bd.betRaiseEV = -1.0f;
+                    bd.message += $" -> Enfrentando aposta: {handStrength.rank}, potOdds={potOdds:P1}; Call bounded.\n";
+                }
+                else
+                {
+                    bd.actionType = ActionType.Fold;
+                    bd.checkCallEV = -amountToCall;
+                    bd.betRaiseEV = -1.0f;
+                    bd.message += $" -> Enfrentando aposta: {handStrength.rank}, potOdds={potOdds:P1}; Fold bounded.\n";
+                }
+
+                return bd;
+            }
+
+            if (strongMadeHand && canHeroBetRaiseNow())
+            {
+                bd.actionType = ActionType.Bet;
+                bd.byAmount = calculatePostFlopBetRaiseAmount(0.0f, 1.0f);
+                bd.checkCallEV = Math.Max(0.1f, pot * 0.25f);
+                bd.betRaiseEV = bd.checkCallEV + Math.Max(0.1f, pot * 0.10f);
+                bd.message += $" -> Sem aposta: {handStrength.rank}; Bet bounded via ExecutionSizingPolicy.\n";
+            }
+            else
+            {
+                bd.actionType = ActionType.Check;
+                bd.byAmount = 0;
+                bd.checkCallEV = Math.Max(0.1f, pot * 0.10f);
+                bd.betRaiseEV = -1.0f;
+                bd.message += $" -> Sem aposta: {handStrength.rank}; Check bounded.\n";
+            }
+
+            return bd;
+        }
+
         private bool tryEvaluatePostFlopMultiSizeEV(ref BotDecision bd)
         {
             // Fase canonical-tree: o avaliador multi-size fica explicitamente depreciado.
@@ -2348,9 +2438,27 @@ if (_street == Street.PreFlop)
         return chartDecision;
 }
 
-// Pos-flop: a decisao volta a ser sempre da arvore completa canonica.
-// O antigo atalho heuristico de flop foi mantido no arquivo apenas como fallback legado,
-// mas nao participa mais do pipeline principal.
+// Pos-flop no caminho sincronico do OpenHoldem precisa de gate de complexidade.
+// A arvore completa canonica continua existindo, mas so e chamada quando o branching
+// e compativel com decisao em tempo real. Caso contrario, usamos avaliador bounded
+// de acao abstrata com ExecutionSizingPolicy, sem FastEV multi-size.
+if (_street != Street.PreFlop && !shouldUseSynchronousCanonicalTreePostFlop(nOfOpponents))
+{
+    string reason = $"arvore canonica sincronica bloqueada por complexidade: street={_street}, oponentes={nOfOpponents}";
+    bd = calculateHeroRuntimeSafePostFlopAction(amountToCall, nOfOpponents, reason);
+    bd.timeSpentSeconds = (DateTime.Now - startTime).TotalSeconds;
+
+    if (IsAtLeastAllInCommitmentThreshold(bd.byAmount, _players[_heroInd].Stack))
+    {
+        bd.message += $" -> But amount to put in pot is at least {_allInCommitmentPercent}% of player's stack, so go all in!\n";
+        bd.byAmount = _players[_heroInd].Stack;
+        bd.actionType = ActionType.AllIn;
+    }
+
+    appendAcademicDecisionDiagnostics(ref bd, amountToCall, nOfOpponents);
+    bd.message = bd.message.Trim();
+    return bd;
+}
 
 // If we are post flop with many opponents than its too time consumming to calculate.
 if (nOfOpponents < 4 || _street == Street.PreFlop)
