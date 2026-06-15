@@ -30,7 +30,8 @@ namespace G5Cpp
 
         HoleCards(int index) : Card0(index / 52), Card1(index % 52)
         {
-            assert(index >= 0 && index <= 2703);
+            assert(index >= 0 && index <= 2651);
+            assert((index / 52) < (index % 52));
             sortCards();
         }
 

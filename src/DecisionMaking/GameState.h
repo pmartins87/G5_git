@@ -42,7 +42,7 @@ namespace G5Cpp
         int bigBlindSize;
 
         // True if evaluation started on or before flop
-        bool stertedOnFlop;
+        bool startedOnFlop;
         float nodeChance;
 
         int BETS_CUTOFF_POST_FLOP = 2;

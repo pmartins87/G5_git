@@ -49,9 +49,14 @@
 static const char* DM_LOG_PATH = "C:\\G5Pressure\\DecisionMaking_debug.log";
 static const char* DM_DIAGNOSTIC_FLAG_PATH = "C:\\G5Pressure\\DecisionMaking.diagnostic";
 static const DWORD DM_FATAL_EXCEPTION_CODE = 0xE0000001;
-static const char* DM_BUILD_ID = "phase12_terminal_rake_preflop_independent";
+static const char* DM_BUILD_ID = "phase14_review_mc_diag_preflop_nodechance";
 
-static bool DMIsDiagnosticEnabled()
+static volatile LONG g_DMDiagnosticCached = 0;
+static volatile LONG g_DMDiagnosticValue = 0;
+static volatile LONG g_DMDiagnosticCheckCount = 0;
+static const LONG DM_DIAGNOSTIC_REFRESH_INTERVAL = 10000;
+
+static bool DMReadDiagnosticFlagFromSystem()
 {
     const char* env = getenv("DECISIONMAKING_DIAGNOSTIC");
 
@@ -68,6 +73,19 @@ static bool DMIsDiagnosticEnabled()
 
     DWORD attrs = GetFileAttributesA(DM_DIAGNOSTIC_FLAG_PATH);
     return (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+static bool DMIsDiagnosticEnabled()
+{
+    LONG count = InterlockedIncrement(&g_DMDiagnosticCheckCount);
+
+    if (g_DMDiagnosticCached != 0 && (count % DM_DIAGNOSTIC_REFRESH_INTERVAL) != 1)
+        return g_DMDiagnosticValue != 0;
+
+    bool enabled = DMReadDiagnosticFlagFromSystem();
+    InterlockedExchange(&g_DMDiagnosticValue, enabled ? 1 : 0);
+    InterlockedExchange(&g_DMDiagnosticCached, 1);
+    return enabled;
 }
 
 static void DMWriteLog(const char* msg, bool force)
@@ -273,6 +291,10 @@ namespace G5Cpp
         const int TCUTOFF_ITERATIONS = 1000;
 
         const float NODE_CHANCE_CUTOFF = 0.0005f;
+
+        const int PREFLOP_MULTIWAY_MC_ITERATIONS = 500;
+
+        static volatile LONG g_DMMonteCarloSeedCounter = 0;
 
         const char* DMStreetName(Street street)
         {
@@ -499,6 +521,36 @@ namespace G5Cpp
         {
             unsigned int v = static_cast<unsigned int>(rng.next());
             return ((v % 1000000u) + 0.5f) / 1000000.0f;
+        }
+
+        int DMCreateMonteCarloSeed(const GameState& prms, const char* salt)
+        {
+            LARGE_INTEGER counter;
+            QueryPerformanceCounter(&counter);
+
+            unsigned int seed = (unsigned int)(counter.QuadPart & 0xFFFFFFFFu);
+            seed ^= (unsigned int)((counter.QuadPart >> 32) & 0xFFFFFFFFu);
+            seed ^= (unsigned int)((ULONG_PTR)&prms);
+            seed ^= (unsigned int)(InterlockedIncrement(&g_DMMonteCarloSeedCounter) * 2654435761u);
+            seed ^= (unsigned int)((prms.heroHoleCards.Card0.toInt() + 1) * 73856093u);
+            seed ^= (unsigned int)((prms.heroHoleCards.Card1.toInt() + 1) * 19349663u);
+            seed ^= (unsigned int)((prms.street + 1) * 83492791u);
+            seed ^= (unsigned int)((prms.numBets + 1) * 2654435761u);
+            seed ^= (unsigned int)((prms.numCallers + 1) * 2246822519u);
+            seed ^= (unsigned int)((prms.startNumActive + 1) * 3266489917u);
+
+            if (salt != nullptr)
+            {
+                for (const char* p = salt; *p != '\0'; ++p)
+                    seed = (seed * 33u) ^ (unsigned char)(*p);
+            }
+
+            seed &= 0x7FFFFFFFu;
+
+            if (seed == 0u)
+                seed = 1u;
+
+            return (int)seed;
         }
 
         int DMSampleHandIndex(const DMRangeSampler& sampler, ParkMillerCarta& rng)
@@ -1117,7 +1169,7 @@ namespace G5Cpp
                 }
 
                 Pot pot(prms._players);
-                ParkMillerCarta rng(1);
+                ParkMillerCarta rng(DMCreateMonteCarloSeed(prms, "showdown multiway"));
 
                 float totalWinnings = 0.0f;
                 float totalTerminalRake = 0.0f;
@@ -1637,7 +1689,7 @@ namespace G5Cpp
                 }
 
                 Pot pot(prms._players);
-                ParkMillerCarta rng(1);
+                ParkMillerCarta rng(DMCreateMonteCarloSeed(prms, "turn cutoff multiway"));
 
                 float totalWinnings = 0.0f;
                 float totalImpliedBonus = 0.0f;
@@ -1831,6 +1883,156 @@ namespace G5Cpp
             return EV;
         }
 
+        int DMCalculatePreflopShowdownStrength(const HoleCards& holeCards, const Card* boardCards)
+        {
+            Card sortedBoard[5];
+            sortBoard(sortedBoard, boardCards, 5);
+
+            HandStrengthCounter counter;
+            counter.addCard(holeCards.Card0);
+            counter.addCard(holeCards.Card1);
+
+            for (int i = 0; i < 5; i++)
+                counter.addCard(boardCards[i]);
+
+            return counter.getHandStrength(holeCards, sortedBoard, 5);
+        }
+
+        bool DMTrySamplePreflopBoard(Card* boardCards, const bool* baseBlocked, const bool* usedOpponentCards, ParkMillerCarta& rng)
+        {
+            bool usedBoardCards[52];
+
+            for (int i = 0; i < 52; i++)
+                usedBoardCards[i] = false;
+
+            int nCards = 0;
+            int guard = 0;
+
+            while (nCards < 5 && guard < 1000)
+            {
+                int card = (int)(rng.next() % 52);
+                guard++;
+
+                if (baseBlocked[card] || usedOpponentCards[card] || usedBoardCards[card])
+                    continue;
+
+                usedBoardCards[card] = true;
+                boardCards[nCards] = Card(card);
+                nCards++;
+            }
+
+            return nCards == 5;
+        }
+
+        float DMEstimatePreflopMultiwayEquityMC(const GameState& prms, const Player** opponents, int nOpponents)
+        {
+            if (nOpponents < 2)
+                return 0.0f;
+
+            bool baseBlocked[52];
+            DMBuildBaseBlockedCards(baseBlocked, prms);
+
+            DMRangeSampler samplers[MAX_PLAYERS];
+
+            for (int i = 0; i < nOpponents; i++)
+                DMBuildRangeSampler(samplers[i], *opponents[i], baseBlocked, "preflop cutoff multiway");
+
+            ParkMillerCarta rng(DMCreateMonteCarloSeed(prms, "preflop cutoff multiway"));
+
+            float totalShare = 0.0f;
+            int nIter = 0;
+            int attempts = 0;
+
+            for (attempts = 0; nIter < PREFLOP_MULTIWAY_MC_ITERATIONS && attempts < PREFLOP_MULTIWAY_MC_ITERATIONS * 300; attempts++)
+            {
+                bool usedOpponentCards[52];
+
+                for (int c = 0; c < 52; c++)
+                    usedOpponentCards[c] = false;
+
+                int opponentHoleCardsInd[MAX_PLAYERS];
+                bool valid = true;
+
+                for (int j = 0; j < nOpponents; j++)
+                {
+                    int c0 = -1;
+                    int c1 = -1;
+                    int sampledHand = DMSampleHandIndex(samplers[j], rng);
+
+                    if (!DMTryReserveOpponentHand(sampledHand, baseBlocked, usedOpponentCards, c0, c1))
+                    {
+                        valid = false;
+                        break;
+                    }
+
+                    opponentHoleCardsInd[j] = sampledHand;
+                }
+
+                if (!valid)
+                    continue;
+
+                Card boardCards[5];
+
+                if (!DMTrySamplePreflopBoard(boardCards, baseBlocked, usedOpponentCards, rng))
+                    continue;
+
+                int heroStrength = DMCalculatePreflopShowdownStrength(prms.heroHoleCards, boardCards);
+                int maxOppStrength = 0;
+                int tiedOpponents = 0;
+
+                for (int j = 0; j < nOpponents; j++)
+                {
+                    HoleCards opponentHoleCards(opponentHoleCardsInd[j]);
+                    int opponentStrength = DMCalculatePreflopShowdownStrength(opponentHoleCards, boardCards);
+
+                    if (opponentStrength > maxOppStrength)
+                    {
+                        maxOppStrength = opponentStrength;
+                        tiedOpponents = 1;
+                    }
+                    else if (opponentStrength == maxOppStrength)
+                    {
+                        tiedOpponents++;
+                    }
+                }
+
+                float heroShare = 0.0f;
+
+                if (heroStrength > maxOppStrength)
+                    heroShare = 1.0f;
+                else if (heroStrength == maxOppStrength)
+                    heroShare = 1.0f / (tiedOpponents + 1);
+
+                totalShare += heroShare;
+                nIter++;
+            }
+
+            if (nIter <= 0)
+            {
+                DMLogAlways("FATAL: nIter == 0 em preflop cutoff multiway. Nenhuma combinacao valida de cartas dos oponentes foi encontrada.");
+                throw std::runtime_error("DecisionMaking: nIter == 0 em preflop cutoff multiway");
+            }
+
+            float equity = totalShare / nIter;
+
+            if (DMIsDiagnosticEnabled())
+            {
+                float acceptance = (attempts > 0) ? (nIter / (float)attempts) : 0.0f;
+
+                DMLogF(
+                    "[DM][PREFLOP CUTOFF MULTIWAY MC] opponents=%d validRuns=%d targetRuns=%d attempts=%d acceptance=%.4f equity=%.6f",
+                    nOpponents,
+                    nIter,
+                    PREFLOP_MULTIWAY_MC_ITERATIONS,
+                    attempts,
+                    acceptance,
+                    equity
+                );
+            }
+
+            return equity;
+        }
+
         float estimateEV_PreFlopCutoff(DMStats& stats, const GameState& prms)
         {
             int nOpponents = 0;
@@ -1850,27 +2052,12 @@ namespace G5Cpp
             }
             else // (nOpponents >= 2)
             {
-                // The original G5 fallback used min(pairwise_equity) * fixed_mod.
-                // That overvalues hands whose HU equity does not survive multiway
-                // collision well, especially low pairs and dominated connectors.
-                // This fallback is still cheap, but models the event "hero beats every
-                // remaining opponent" as the product of pairwise win probabilities.
-                float multiwayEquityProxy = 1.0f;
-
-                for (int i = 0; i < nOpponents; i++)
-                {
-                    float equity = PreFlopEquity::calculate(prms.heroHoleCards, opponents[i]->range());
-
-                    if (!std::isfinite(equity) || equity < 0.0f)
-                        equity = 0.0f;
-
-                    if (equity > 1.0f)
-                        equity = 1.0f;
-
-                    multiwayEquityProxy *= equity;
-                }
-
-                EV = multiwayEquityProxy * prms.getPossibleWinnings();
+                // Multiway preflop fallback with explicit card removal between
+                // opponents. This replaces both the original min-equity heuristic
+                // and the independent-HU product proxy, which cannot see blockers
+                // and collision between opponent ranges.
+                float equity = DMEstimatePreflopMultiwayEquityMC(prms, opponents, nOpponents);
+                EV = equity * prms.getPossibleWinnings();
             }
 
             // If there are opponents and we have some money left...
@@ -1953,7 +2140,7 @@ namespace G5Cpp
                 {
                     // If the current street is turn and estimation started on flop, cut it.
                     // But, if we have just two players, don't stop on turn. Go all the way down.
-                    if (prms.street == Street_Turn && prms.stertedOnFlop && prms.startNumActive > 2)
+                    if (prms.street == Street_Turn && prms.startedOnFlop && prms.startNumActive > 2)
                     {
                         return estimateEV_TurnCutoff(stats, prms);
                     }
@@ -1965,12 +2152,15 @@ namespace G5Cpp
             }
             else if (prms.playerToActInd == prms.heroInd) // Mi igramo
             {
-                float foldEV = 0.0f;
+                // Fold EV = 0: ao foldar, o hero nao investe fichas adicionais
+                // neste ramo. O dinheiro ja colocado no pote e custo afundado
+                // para a comparacao local de EV.
+                const float foldEV = 0.0f;
                 float checkCallEV = 0.0f;
                 float betRaiseEV = 0.0f;
                 estimateEV_HeroPlays(checkCallEV, betRaiseEV, stats, prms);
 
-                float EV = (std::max)(checkCallEV, (std::max)(foldEV, betRaiseEV));
+                float EV = (std::max)(foldEV, (std::max)(checkCallEV, betRaiseEV));
                 return EV;
             }
             else // (playerToAct != hero)
@@ -2002,8 +2192,8 @@ DMResetDiagnosticCounters();
             bigBlindSize
         );
 
-        // Inicializa os EVs para valores reconhecÃƒÂ¯Ã‚Â¿Ã‚Â½veis.
-        // Estes valores NÃƒÂ¯Ã‚Â¿Ã‚Â½O devem ser usados como decisÃƒÂ¯Ã‚Â¿Ã‚Â½o, servem apenas para diagnÃƒÂ¯Ã‚Â¿Ã‚Â½stico
+        // Inicializa os EVs para valores reconhecÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¿Ãƒâ€šÃ‚Â½veis.
+        // Estes valores NÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¿Ãƒâ€šÃ‚Â½O devem ser usados como decisÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¿Ãƒâ€šÃ‚Â½o, servem apenas para diagnÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¿Ãƒâ€šÃ‚Â½stico
         // caso a chamada seja interrompida antes de calcular os EVs reais.
         checkCallEV = -999999.0f;
         betRaiseEV = -999999.0f;
@@ -2211,9 +2401,3 @@ DMResetDiagnosticCounters();
 
 
 }
-
-
-
-
-
-

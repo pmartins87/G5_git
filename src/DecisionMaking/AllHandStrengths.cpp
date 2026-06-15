@@ -85,7 +85,13 @@ namespace G5Cpp
                 StrengthSortPair* A = (StrengthSortPair*)a;
                 StrengthSortPair* B = (StrengthSortPair*)b;
 
-                return (B->strength - A->strength);
+                if (B->strength > A->strength)
+                    return 1;
+
+                if (B->strength < A->strength)
+                    return -1;
+
+                return 0;
             }
         };
     } // namespace

@@ -139,7 +139,7 @@ namespace G5Cpp
         this->numCallers = numCallers;
         this->startNumBets = numBets;
         this->bigBlindSize = bigBlindSize;
-        this->stertedOnFlop = (street <= Street_Flop);
+        this->startedOnFlop = (street <= Street_Flop);
         this->nodeChance = 1.0f;
         this->startNumActive = numActiveNonAllInPlayers();
     }
@@ -241,7 +241,7 @@ namespace G5Cpp
         int effectivePot = std::max(1, potSize() + amountToCall);
         float spr = heroStack / (float)effectivePot;
 
-        // Se o SPR do no já é menor ou igual a 1, qualquer bet/raise parcial deixa
+        // Se o SPR do no jÃ¡ Ã© menor ou igual a 1, qualquer bet/raise parcial deixa
         // uma sobra artificial e distorce a arvore. O size canonico passa a ser all-in.
         if (spr <= 1.0f)
             return heroStack;
@@ -253,7 +253,7 @@ namespace G5Cpp
 
         if (street == Street_River && !facingBet && wetness <= 0.30f && activeNonAllIn <= 2 && spr <= 2.25f)
         {
-            // Nó polarizado: river seco, HU e SPR que permite pressão real.
+            // NÃ³ polarizado: river seco, HU e SPR que permite pressÃ£o real.
             fraction = 1.25f;
         }
         else if (wetness >= 0.70f)
@@ -510,7 +510,7 @@ namespace G5Cpp
         }
         else
         {
-            int round = playerToAct().gound();
+            int round = playerToAct().round();
             ActionType prevAction = (round == 0) ? playerToAct().prevStreetAction() : playerToAct().lastAction();
 
             PostFlopParams params(
@@ -679,7 +679,7 @@ namespace G5Cpp
         newPrms.startNumBets = 0;
         newPrms.numBets = 0;
         newPrms.numCallers = 0;
-        newPrms.nodeChance = 1.0f;
+        newPrms.nodeChance = this->nodeChance;
 
         return newPrms;
     }

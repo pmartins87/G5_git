@@ -4,7 +4,6 @@
 #include "tbb/parallel_reduce.h"
 #include "tbb/blocked_range.h"
 #include <algorithm>
-#include <vector>
 #include <assert.h>
 #include <stdexcept>
 #include <cstdio>
@@ -50,27 +49,12 @@ namespace G5Cpp
                     return 0;
                 }
             }
-
-            static bool Less(const EquitySortPair& A, const EquitySortPair& B)
-            {
-                return (B.equity < A.equity);
-            }
         };
 
         void SortEquities(EquitySortPair* pairs, int nPairs)
         {
-            if (false)
-            {
-                // Stable sort implementation
-                std::vector<EquitySortPair> myvector;
-                myvector.assign(pairs, pairs+nPairs);
-                std::stable_sort(myvector.begin(), myvector.end(), EquitySortPair::Less);
-            }
-            else
-            {
-                // Unstable but faster
-                qsort(pairs, nPairs, sizeof(EquitySortPair), EquitySortPair::Compare);
-            }
+            // qsort is sufficient here: stable ordering is not required for equal equity.
+            qsort(pairs, nPairs, sizeof(EquitySortPair), EquitySortPair::Compare);
         }
 
         struct StrengthSortPair
@@ -96,12 +80,13 @@ namespace G5Cpp
                 StrengthSortPair* A = (StrengthSortPair*)a;
                 StrengthSortPair* B = (StrengthSortPair*)b;
 
-                return (B->strength - A->strength);
-            }
+                if (B->strength > A->strength)
+                    return 1;
 
-            static bool Less(const StrengthSortPair& A, const StrengthSortPair& B)
-            {
-                return (B.strength < A.strength);
+                if (B->strength < A->strength)
+                    return -1;
+
+                return 0;
             }
         };
 
@@ -126,18 +111,8 @@ namespace G5Cpp
 
             assert (k == nPairs);
 
-            if (false)
-            {
-                // Stable sort implementation
-                std::vector<StrengthSortPair> myvector;
-                myvector.assign(pairs, pairs+nPairs);
-                std::stable_sort(myvector.begin(), myvector.end(), StrengthSortPair::Less);
-            }
-            else
-            {
-                // Unstable but faster
-                qsort(pairs, nPairs, sizeof(StrengthSortPair), StrengthSortPair::Compare);
-            }
+            // qsort is sufficient here: stable ordering is not required for equal strength.
+            qsort(pairs, nPairs, sizeof(StrengthSortPair), StrengthSortPair::Compare);
         }
 
         void SortAtRiver(SortedHoleCards& sortedResult, float* turnEquities, int* turnCounts, const AllCounters& counters, const bool* isBoardCard)
@@ -195,13 +170,13 @@ namespace G5Cpp
                     int c2 = ind % 52;
 
                     {
-                        int ahead = i - (46 - tieBehindOcc[c1]) - (46 - tieBehindOcc[c2]);
-                        int tie = (j - i) - (tieOcc[c1] - 1) - (tieOcc[c2] - 1) - 1;
-                        int behind = (N_HOLECARDS_RIVER - j) - (tieBehindOcc[c1] - tieOcc[c1]) - (tieBehindOcc[c2] - tieOcc[c2]);
+                        int beatsUs = i - (46 - tieBehindOcc[c1]) - (46 - tieBehindOcc[c2]);
+                        int tiesWithUs = (j - i) - (tieOcc[c1] - 1) - (tieOcc[c2] - 1) - 1;
+                        int weBeat = (N_HOLECARDS_RIVER - j) - (tieBehindOcc[c1] - tieOcc[c1]) - (tieBehindOcc[c2] - tieOcc[c2]);
 
-                        assert (ahead + tie + behind == 990);
+                        assert (beatsUs + tiesWithUs + weBeat == 990);
 
-                        float equity = (behind + tie / 2.0f) / (ahead + tie + behind);
+                        float equity = (weBeat + tiesWithUs / 2.0f) / (beatsUs + tiesWithUs + weBeat);
 
                         // EV^2 improvement from POLARIS.
                         equity *= equity;

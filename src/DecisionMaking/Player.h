@@ -189,7 +189,7 @@ namespace G5Cpp
             _lastAction = Action_Fold;
         }
 
-        int gound() const
+        int round() const
         {
             return (_lastAction == Action_Fold) ? 0 : 1;
         }
