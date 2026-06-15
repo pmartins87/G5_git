@@ -608,24 +608,29 @@ static bool Step_ProcessSegment(int stopChair, int targetStreet)
         sprintf(sym, "currentbet%d", c); int currentBet = ReadCents(sym);
         sprintf(sym, "balance%d", c); int bal = ReadCents(sym);
         int delta = currentBet - g_lastPlayerBets[c];
+        bool waitingForBetValue = false;
 
-        // Se o OpenHoldem diz que houve aÃ§Ã£o, mas o valor ainda nÃ£o atualizou na tela:
+        // Se o OpenHoldem diz que houve acao, mas o valor ainda nao atualizou na tela:
+        // - Call pode ser sincronizado com segurança usando o facingBet conhecido.
+        // - Raise/Bet NAO pode ser inventado com delta=1, porque isso cria ficha fantasma.
+        //   Nesse caso aguardamos o proximo scrape trazer currentbet atualizado.
         if ((didRaise || didCall) && delta <= 0) {
             if (didCall && facingBet > g_lastPlayerBets[c]) {
-                delta = facingBet - g_lastPlayerBets[c]; // O Call Ã© exatamente o que falta para cobrir a aposta
+                delta = facingBet - g_lastPlayerBets[c]; // O Call e exatamente o que falta para cobrir a aposta
             }
             else if (didRaise) {
-                delta = currentBet > 0 ? currentBet : 1;
+                waitingForBetValue = true;
+                delta = 0;
             }
             else {
                 delta = 0;
             }
         }
 
-        WriteLog("[user.cpp]   %s c%d: curBet=%d last=%d delta=%d bal=%d facingBet=%d bits(f%d c%d r%d p%d)\n",
+        WriteLog("[user.cpp]   %s c%d: curBet=%d last=%d delta=%d bal=%d facingBet=%d bits(f%d c%d r%d p%d) pendingMoney=%d\n",
             PositionName(g_chairToLogical[c], g_buttonLogIdx, g_numLogicalPlayers),
             c, currentBet, g_lastPlayerBets[c], delta, bal, facingBet,
-            didFold, didCall, didRaise, isPlaying);
+            didFold, didCall, didRaise, isPlaying, waitingForBetValue ? 1 : 0);
 
         bool mathFold = (!didCall && !didRaise && !didFold
             && delta == 0
@@ -643,15 +648,19 @@ static bool Step_ProcessSegment(int stopChair, int targetStreet)
             LogAction(mathFold ? "Fold(deduzido)" : "Fold(bit)", c, g_chairToLogical[c], ACT_FOLD, 0);
         }
         // 2. AÃ‡ÃƒO COM FICHAS
-        else if (didRaise || didCall || delta > 0)
+        else if (delta > 0)
         {
             G5Action act;
+            int acceptedBet = g_lastPlayerBets[c] + delta;
 
-            if (bal == 0 && currentBet > 0) {
+            if (currentBet > acceptedBet)
+                acceptedBet = currentBet;
+
+            if (bal == 0 && acceptedBet > 0) {
                 act = ACT_ALLIN;
                 g_wentAllIn[c] = true;
             }
-            else if (didRaise || currentBet > facingBet) {
+            else if (didRaise || acceptedBet > facingBet) {
                 if (facingBet == 0 && targetStreet > 1)
                     act = ACT_BET;
                 else
@@ -661,12 +670,19 @@ static bool Step_ProcessSegment(int stopChair, int targetStreet)
                 act = ACT_CALL;
             }
 
-            g_lastPlayerBets[c] = currentBet;
-            if (currentBet > facingBet) facingBet = currentBet;
+            // Atualiza a memoria pelo delta efetivamente enviado ao G5, nao pelo currentBet
+            // que pode estar atrasado no scrape atual. Isso evita double-count no scrape seguinte.
+            g_lastPlayerBets[c] = acceptedBet;
+            if (acceptedBet > facingBet) facingBet = acceptedBet;
 
             SafeNewAction(g_chairToLogical[c], (int)act, delta);
             acted = true;
-            LogAction((didRaise || didCall) ? "AÃ§Ã£o(bit)" : "AÃ§Ã£o(delta)", c, g_chairToLogical[c], (int)act, delta);
+            LogAction((didRaise || didCall) ? "Acao(bit/delta-confirmado)" : "Acao(delta)", c, g_chairToLogical[c], (int)act, delta);
+        }
+        else if (waitingForBetValue)
+        {
+            WriteLog("[user.cpp]   aguardando currentbet atualizar para acao de bet/raise em c%d; nada enviado ao G5 neste scrape. Cursor mantido para reprocessar a cadeira.\n", c);
+            break;
         }
         // 3. CHECK
         else if (delta == 0 && bal > 0 && !g_hasCheckedThisStreet[c])

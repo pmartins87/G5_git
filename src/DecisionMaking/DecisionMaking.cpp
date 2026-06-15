@@ -49,7 +49,7 @@
 static const char* DM_LOG_PATH = "C:\\G5Pressure\\DecisionMaking_debug.log";
 static const char* DM_DIAGNOSTIC_FLAG_PATH = "C:\\G5Pressure\\DecisionMaking.diagnostic";
 static const DWORD DM_FATAL_EXCEPTION_CODE = 0xE0000001;
-static const char* DM_BUILD_ID = "phase8_1_syncfix_mc2000_tc1000_cutoff0005";
+static const char* DM_BUILD_ID = "phase12_terminal_rake_preflop_independent";
 
 static bool DMIsDiagnosticEnabled()
 {
@@ -273,13 +273,6 @@ namespace G5Cpp
         const int TCUTOFF_ITERATIONS = 1000;
 
         const float NODE_CHANCE_CUTOFF = 0.0005f;
-
-        // Phase 6A: optional root-only forced bet/raise amount.
-        // Used only by EstimateEVForBetRaiseAmount to evaluate candidate sizings.
-        // The flag is consumed at the root hero node before evaluating the check/call branch,
-        // so recursive future hero decisions keep their normal default sizing.
-        static bool g_DMForceRootBetRaiseAmount = false;
-        static int g_DMForcedRootBetRaiseAmount = 0;
 
         const char* DMStreetName(Street street)
         {
@@ -696,7 +689,7 @@ namespace G5Cpp
         /// <summary>
         /// Calculate the hero EV if it is the hero's turn.
         /// </summary>
-        void estimateEV_HeroPlays(float& checkCallEV, float& betRaiseEV, DMStats& stats, const GameState& prms)
+        void estimateEV_HeroPlays(float& checkCallEV, float& betRaiseEV, DMStats& stats, const GameState& prms, int forcedRootBetRaiseAmount = 0)
         {
             assert(prms.heroInd == prms.playerToActInd);
 
@@ -704,14 +697,9 @@ namespace G5Cpp
             int callCost = prms.getAmountToCall();
             bool canRaise = prms.canNextPlayerRaise();
             int raiseAmount = canRaise ? DMDebugRaiseAmount(prms, callCost) : 0;
-            int forcedRootBetRaiseAmount = 0;
 
-            if (g_DMForceRootBetRaiseAmount)
-            {
-                forcedRootBetRaiseAmount = g_DMForcedRootBetRaiseAmount;
-                g_DMForceRootBetRaiseAmount = false;
-                g_DMForcedRootBetRaiseAmount = 0;
-            }
+            if (forcedRootBetRaiseAmount < 0)
+                forcedRootBetRaiseAmount = 0;
 
             if (logHeroNode)
             {
@@ -972,6 +960,42 @@ namespace G5Cpp
             return totalEV / cnt;
         }
 
+        float DMTerminalRakeForHeroWinnings(const GameState& prms, float grossWinnings)
+        {
+            if (!(grossWinnings > 0.0f) || !std::isfinite(grossWinnings))
+                return 0.0f;
+
+            if (prms.bigBlindSize <= 0)
+                return 0.0f;
+
+            float rake = 0.0f;
+
+            // Same simplified rake schedule used by GameState::getPossibleWinnings(),
+            // but applied to terminal multiway pot shares that bypass that function.
+            if (prms.bigBlindSize <= 10)
+            {
+                rake = grossWinnings * 0.10f;
+                rake = (std::min)(rake, 10.0f);
+            }
+            else
+            {
+                rake = grossWinnings / 15.0f;
+            }
+
+            if (!std::isfinite(rake) || rake < 0.0f)
+                return 0.0f;
+
+            return (std::min)(rake, grossWinnings);
+        }
+
+        float DMApplyTerminalRakeToHeroWinnings(const GameState& prms, float grossWinnings)
+        {
+            if (!(grossWinnings > 0.0f) || !std::isfinite(grossWinnings))
+                return 0.0f;
+
+            return grossWinnings - DMTerminalRakeForHeroWinnings(prms, grossWinnings);
+        }
+
         /// <summary>
         /// Calculates EV when show down occurs
         /// </summary>
@@ -1096,6 +1120,7 @@ namespace G5Cpp
                 ParkMillerCarta rng(1);
 
                 float totalWinnings = 0.0f;
+                float totalTerminalRake = 0.0f;
                 int nIter = 0;
                 int attempts = 0;
 
@@ -1134,7 +1159,12 @@ namespace G5Cpp
                     }
 
                     pot.addHandStrength(heroHandStrength, prms.hero().moneyInPot());
-                    totalWinnings += pot.calculateWinnings(heroHandStrength, prms.hero().moneyInPot());
+
+                    float grossWinnings = pot.calculateWinnings(heroHandStrength, prms.hero().moneyInPot());
+                    float adjustedWinnings = DMApplyTerminalRakeToHeroWinnings(prms, grossWinnings);
+                    totalTerminalRake += grossWinnings - adjustedWinnings;
+                    totalWinnings += adjustedWinnings;
+
                     pot.reset();
                     nIter++;
                 }
@@ -1153,7 +1183,7 @@ namespace G5Cpp
                     float acceptance = (attempts > 0) ? (nIter / (float)attempts) : 0.0f;
 
                     DMLogF(
-                        "[DM][SHOWDOWN MULTIWAY] street=%s pot=%d possibleWinnings=%.2f opponents=%d validRuns=%d targetRuns=%d attempts=%d acceptance=%.4f EV=%.6f nodeChance=%.6f",
+                        "[DM][SHOWDOWN MULTIWAY RAKED] street=%s pot=%d possibleWinnings=%.2f opponents=%d validRuns=%d targetRuns=%d attempts=%d acceptance=%.4f avgTerminalRake=%.6f EV=%.6f nodeChance=%.6f",
                         DMStreetName(prms.street),
                         DMDebugPotSize(prms),
                         possibleWinnings,
@@ -1162,6 +1192,7 @@ namespace G5Cpp
                         SHOWDOWN_ITERATIONS,
                         attempts,
                         acceptance,
+                        nIter > 0 ? (totalTerminalRake / nIter) : 0.0f,
                         EV,
                         prms.nodeChance
                     );
@@ -1181,6 +1212,299 @@ namespace G5Cpp
             {
                 ahead += 0.5f;
             }
+        }
+
+        int DMHandRankFromStrength(int handStrength)
+        {
+            int base1 = 15;
+            int base2 = base1 * 15;
+            int base3 = base2 * 15;
+            int base4 = base3 * 15;
+            int base5 = base4 * 15;
+
+            if (handStrength <= 0)
+                return (int)Rank_HighCard;
+
+            int rank = handStrength / base5;
+
+            if (rank < (int)Rank_HighCard)
+                return (int)Rank_HighCard;
+
+            if (rank >= (int)Rank_Length)
+                return (int)Rank_StreightFlush;
+
+            return rank;
+        }
+
+        float DMRiverValueFractionFromRank(int heroTurnStrength, int heroRiverStrength)
+        {
+            int turnRank = DMHandRankFromStrength(heroTurnStrength);
+            int riverRank = DMHandRankFromStrength(heroRiverStrength);
+
+            // O cutoff existe para estimar implied odds de equity que ainda nao
+            // estava materializada no turn. Se o river nao melhorou a classe da mao,
+            // nao adicionamos lucro extra para evitar transformar value ja existente
+            // em bonus artificial.
+            if (riverRank <= turnRank)
+                return 0.0f;
+
+            if (riverRank >= (int)Rank_FullHouse)
+                return 0.50f;
+
+            if (riverRank == (int)Rank_Flush || riverRank == (int)Rank_Straight)
+                return 0.38f;
+
+            if (riverRank == (int)Rank_Trips || riverRank == (int)Rank_Set)
+                return 0.22f;
+
+            if (riverRank == (int)Rank_TwoPair)
+                return 0.12f;
+
+            return 0.0f;
+        }
+
+        float DMOpponentRiverCallWeightWhenBeaten(int opponentRiverStrength)
+        {
+            int rank = DMHandRankFromStrength(opponentRiverStrength);
+
+            if (rank >= (int)Rank_FullHouse)
+                return 0.90f;
+
+            if (rank == (int)Rank_Flush || rank == (int)Rank_Straight)
+                return 0.70f;
+
+            if (rank == (int)Rank_Trips || rank == (int)Rank_Set)
+                return 0.48f;
+
+            if (rank == (int)Rank_TwoPair)
+                return 0.32f;
+
+            if (rank == (int)Rank_OnePair)
+                return 0.14f;
+
+            return 0.04f;
+        }
+
+        float DMHeroRiverCallWeightWhenBehind(int heroRiverStrength)
+        {
+            int rank = DMHandRankFromStrength(heroRiverStrength);
+
+            if (rank >= (int)Rank_FullHouse)
+                return 0.82f;
+
+            if (rank == (int)Rank_Flush || rank == (int)Rank_Straight)
+                return 0.62f;
+
+            if (rank == (int)Rank_Trips || rank == (int)Rank_Set)
+                return 0.42f;
+
+            if (rank == (int)Rank_TwoPair)
+                return 0.28f;
+
+            if (rank == (int)Rank_OnePair)
+                return 0.13f;
+
+            return 0.03f;
+        }
+
+        float DMOpponentRiverValueBetWeightWhenAhead(int opponentRiverStrength)
+        {
+            int rank = DMHandRankFromStrength(opponentRiverStrength);
+
+            if (rank >= (int)Rank_FullHouse)
+                return 0.92f;
+
+            if (rank == (int)Rank_Flush || rank == (int)Rank_Straight)
+                return 0.78f;
+
+            if (rank == (int)Rank_Trips || rank == (int)Rank_Set)
+                return 0.54f;
+
+            if (rank == (int)Rank_TwoPair)
+                return 0.36f;
+
+            if (rank == (int)Rank_OnePair)
+                return 0.16f;
+
+            return 0.04f;
+        }
+
+        float DMCalculateBoundedRiverImpliedBonusForTurnCutoff(
+            const GameState& prms,
+            const Pot& pot,
+            int potIndex,
+            int nOpponents,
+            const Player** opponents,
+            const int* opponentTurnStrength,
+            const int* opponentRiverStrength,
+            float heroShare,
+            int heroTurnStrength,
+            int heroRiverStrength)
+        {
+            if (nOpponents < 2)
+                return 0.0f;
+
+            if (heroShare < 0.999f)
+                return 0.0f;
+
+            float valueFraction = DMRiverValueFractionFromRank(heroTurnStrength, heroRiverStrength);
+
+            if (valueFraction <= 0.0f)
+                return 0.0f;
+
+            int maxOppTurnStrength = 0;
+            int eligibleOpponents = 0;
+            int totalStackBehindCap = 0;
+            float expectedCalls = 0.0f;
+
+            for (int j = 0; j < nOpponents; j++)
+            {
+                if (opponents[j]->moneyInPot() < pot.getHeight(potIndex))
+                    continue;
+
+                if (opponentTurnStrength[j] > maxOppTurnStrength)
+                    maxOppTurnStrength = opponentTurnStrength[j];
+
+                int stackBehind = opponents[j]->stack();
+
+                if (stackBehind <= 0)
+                    continue;
+
+                eligibleOpponents++;
+                totalStackBehindCap += stackBehind;
+
+                // Quanto mais forte for a mao derrotada no river, maior a chance
+                // abstrata de pagar uma value bet. Isso substitui a antiga ideia de
+                // bonus fixo de 50% do pote por uma estimativa condicionada ao runout
+                // e a mao amostrada do oponente.
+                expectedCalls += DMOpponentRiverCallWeightWhenBeaten(opponentRiverStrength[j]);
+            }
+
+            if (eligibleOpponents <= 0 || totalStackBehindCap <= 0)
+                return 0.0f;
+
+            bool heroWasAlreadyBestOnTurn = (maxOppTurnStrength == 0 || heroTurnStrength > maxOppTurnStrength);
+
+            if (heroWasAlreadyBestOnTurn)
+                return 0.0f;
+
+            float sidePotMoney = pot.getMoney(potIndex);
+            float abstractBet = sidePotMoney * valueFraction;
+            float heroStackCap = (float)prms.hero().stack();
+            float stackCap = (std::min)(heroStackCap, (float)totalStackBehindCap);
+
+            if (eligibleOpponents >= 2)
+                expectedCalls = (std::min)(expectedCalls, 1.35f);
+            else
+                expectedCalls = (std::min)(expectedCalls, 1.0f);
+
+            float bonus = abstractBet * expectedCalls;
+            bonus = (std::min)(bonus, stackCap);
+
+            // Mesmo em multiway, este cutoff deve ser conservador: ele apenas corrige
+            // a ausencia completa de uma rodada de apostas no river, sem criar EV
+            // ilimitado nem transformar todo river vencedor em pagamento automatico.
+            bonus = (std::min)(bonus, sidePotMoney * 0.75f);
+
+            if (!std::isfinite(bonus) || bonus < 0.0f)
+                return 0.0f;
+
+            return bonus;
+        }
+
+        float DMCalculateBoundedRiverReverseImpliedPenaltyForTurnCutoff(
+            const GameState& prms,
+            const Pot& pot,
+            int potIndex,
+            int nOpponents,
+            const Player** opponents,
+            const int* opponentTurnStrength,
+            const int* opponentRiverStrength,
+            float heroShare,
+            int heroTurnStrength,
+            int heroRiverStrength)
+        {
+            if (nOpponents < 2)
+                return 0.0f;
+
+            // Reverse implied odds apply only when the hero loses cleanly on the
+            // river. Ties keep the normal pot-share model.
+            if (heroShare > 0.001f)
+                return 0.0f;
+
+            int maxOppTurnStrength = 0;
+            int bestOppRiverStrength = 0;
+            int bettorStackCap = 0;
+            float bestValueFraction = 0.0f;
+            float bestBetWeight = 0.0f;
+
+            for (int j = 0; j < nOpponents; j++)
+            {
+                if (opponents[j]->moneyInPot() < pot.getHeight(potIndex))
+                    continue;
+
+                if (opponentTurnStrength[j] > maxOppTurnStrength)
+                    maxOppTurnStrength = opponentTurnStrength[j];
+
+                if (opponentRiverStrength[j] <= heroRiverStrength)
+                    continue;
+
+                int stackBehind = opponents[j]->stack();
+
+                if (stackBehind <= 0)
+                    continue;
+
+                float valueFraction = DMRiverValueFractionFromRank(
+                    opponentTurnStrength[j],
+                    opponentRiverStrength[j]);
+
+                // This penalty is not a generic cooler tax. It is the mirror image
+                // of the positive implied-odds bonus: it only fires when an
+                // opponent's equity was not materialized on the turn and becomes a
+                // made value hand on the river.
+                if (valueFraction <= 0.0f)
+                    continue;
+
+                float betWeight = DMOpponentRiverValueBetWeightWhenAhead(opponentRiverStrength[j]);
+
+                if (opponentRiverStrength[j] > bestOppRiverStrength)
+                    bestOppRiverStrength = opponentRiverStrength[j];
+
+                if (stackBehind > bettorStackCap)
+                    bettorStackCap = stackBehind;
+
+                if (valueFraction > bestValueFraction)
+                    bestValueFraction = valueFraction;
+
+                if (betWeight > bestBetWeight)
+                    bestBetWeight = betWeight;
+            }
+
+            if (bestOppRiverStrength <= 0 || bettorStackCap <= 0 || bestValueFraction <= 0.0f || bestBetWeight <= 0.0f)
+                return 0.0f;
+
+            bool heroWasAlreadyBestOnTurn = (maxOppTurnStrength == 0 || heroTurnStrength > maxOppTurnStrength);
+
+            if (!heroWasAlreadyBestOnTurn)
+                return 0.0f;
+
+            float heroCallWeight = DMHeroRiverCallWeightWhenBehind(heroRiverStrength);
+
+            if (heroCallWeight <= 0.0f)
+                return 0.0f;
+
+            float sidePotMoney = pot.getMoney(potIndex);
+            float abstractBet = sidePotMoney * bestValueFraction;
+            float penalty = abstractBet * bestBetWeight * heroCallWeight;
+            float stackCap = (std::min)((float)prms.hero().stack(), (float)bettorStackCap);
+
+            penalty = (std::min)(penalty, stackCap);
+            penalty = (std::min)(penalty, sidePotMoney * 0.75f);
+
+            if (!std::isfinite(penalty) || penalty < 0.0f)
+                return 0.0f;
+
+            return penalty;
         }
 
         float estimateEV_TurnCutoff(DMStats& stats, const GameState& prms)
@@ -1316,6 +1640,11 @@ namespace G5Cpp
                 ParkMillerCarta rng(1);
 
                 float totalWinnings = 0.0f;
+                float totalImpliedBonus = 0.0f;
+                float totalReversePenalty = 0.0f;
+                float totalTerminalRake = 0.0f;
+                int impliedBonusEvents = 0;
+                int reversePenaltyEvents = 0;
                 int nRiversChecked = 0;
                 int nIter = 0;
                 int attempts = 0;
@@ -1328,6 +1657,7 @@ namespace G5Cpp
                         usedOpponentCards[c] = false;
 
                     int opponentHoleCardsInd[MAX_PLAYERS];
+                    int opponentTurnStrength[MAX_PLAYERS];
                     const int* oppRiverStrengths[MAX_PLAYERS];
                     bool iterationValid = true;
 
@@ -1344,6 +1674,7 @@ namespace G5Cpp
                         }
 
                         opponentHoleCardsInd[j] = sampledHand;
+                        opponentTurnStrength[j] = handStrenghts.getTurnHandStrength(turn, sampledHand);
                         oppRiverStrengths[j] = handStrenghts.getRiverHandStrengths(turn, sampledHand);
                     }
 
@@ -1352,6 +1683,7 @@ namespace G5Cpp
 
                     int validRivers = 0;
                     float iterationWinnings = 0.0f;
+                    int heroTurnStrength = handStrenghts.getTurnHandStrength(turn, prms.heroHoleCards.toInt());
 
                     for (int river = 0; river < 52; river++)
                     {
@@ -1359,6 +1691,8 @@ namespace G5Cpp
                             continue;
 
                         int heroStrength = heroRiverStrengths[river];
+                        float riverGrossWinnings = 0.0f;
+                        float riverReversePenalty = 0.0f;
 
                         for (int ip = 0; ip < pot.numPots(); ip++)
                         {
@@ -1397,8 +1731,54 @@ namespace G5Cpp
                                 heroShare = 1.0f / (tiedOpponents + 1);
                             }
 
-                            iterationWinnings += pot.getMoney(ip) * heroShare;
+                            int opponentRiverStrength[MAX_PLAYERS];
+
+                            for (int j = 0; j < nOpponents; j++)
+                                opponentRiverStrength[j] = oppRiverStrengths[j][river];
+
+                            float impliedOddsBonus = DMCalculateBoundedRiverImpliedBonusForTurnCutoff(
+                                prms,
+                                pot,
+                                ip,
+                                nOpponents,
+                                opponents,
+                                opponentTurnStrength,
+                                opponentRiverStrength,
+                                heroShare,
+                                heroTurnStrength,
+                                heroStrength);
+
+                            float reverseImpliedPenalty = DMCalculateBoundedRiverReverseImpliedPenaltyForTurnCutoff(
+                                prms,
+                                pot,
+                                ip,
+                                nOpponents,
+                                opponents,
+                                opponentTurnStrength,
+                                opponentRiverStrength,
+                                heroShare,
+                                heroTurnStrength,
+                                heroStrength);
+
+                            if (impliedOddsBonus > 0.0f)
+                            {
+                                impliedBonusEvents++;
+                                totalImpliedBonus += impliedOddsBonus;
+                            }
+
+                            if (reverseImpliedPenalty > 0.0f)
+                            {
+                                reversePenaltyEvents++;
+                                totalReversePenalty += reverseImpliedPenalty;
+                            }
+
+                            riverGrossWinnings += (pot.getMoney(ip) * heroShare) + impliedOddsBonus;
+                            riverReversePenalty += reverseImpliedPenalty;
                         }
+
+                        float riverAdjustedWinnings = DMApplyTerminalRakeToHeroWinnings(prms, riverGrossWinnings);
+                        totalTerminalRake += riverGrossWinnings - riverAdjustedWinnings;
+                        iterationWinnings += riverAdjustedWinnings - riverReversePenalty;
 
                         validRivers++;
                     }
@@ -1428,7 +1808,7 @@ namespace G5Cpp
                     float acceptance = (attempts > 0) ? (nIter / (float)attempts) : 0.0f;
 
                     DMLogF(
-                        "[DM][TURN CUTOFF MULTIWAY EXACT-RIVER] pot=%d opponents=%d validRuns=%d targetRuns=%d attempts=%d acceptance=%.4f avgRiversChecked=%.2f pots=%d EV=%.6f nodeChance=%.6f",
+                        "[DM][TURN CUTOFF MULTIWAY IMPLIED-REVERSE-RAKED] pot=%d opponents=%d validRuns=%d targetRuns=%d attempts=%d acceptance=%.4f avgRiversChecked=%.2f pots=%d impliedEvents=%d avgImpliedBonus=%.6f reverseEvents=%d avgReversePenalty=%.6f avgTerminalRake=%.6f EV=%.6f nodeChance=%.6f",
                         DMDebugPotSize(prms),
                         nOpponents,
                         nIter,
@@ -1437,6 +1817,11 @@ namespace G5Cpp
                         acceptance,
                         avgRiversChecked,
                         pot.numPots(),
+                        impliedBonusEvents,
+                        impliedBonusEvents > 0 ? (totalImpliedBonus / impliedBonusEvents) : 0.0f,
+                        reversePenaltyEvents,
+                        reversePenaltyEvents > 0 ? (totalReversePenalty / reversePenaltyEvents) : 0.0f,
+                        nIter > 0 ? (totalTerminalRake / nIter) : 0.0f,
                         EV,
                         prms.nodeChance
                     );
@@ -1465,26 +1850,27 @@ namespace G5Cpp
             }
             else // (nOpponents >= 2)
             {
-                float minEquity = (std::numeric_limits<float>::max)();
+                // The original G5 fallback used min(pairwise_equity) * fixed_mod.
+                // That overvalues hands whose HU equity does not survive multiway
+                // collision well, especially low pairs and dominated connectors.
+                // This fallback is still cheap, but models the event "hero beats every
+                // remaining opponent" as the product of pairwise win probabilities.
+                float multiwayEquityProxy = 1.0f;
 
                 for (int i = 0; i < nOpponents; i++)
                 {
                     float equity = PreFlopEquity::calculate(prms.heroHoleCards, opponents[i]->range());
-                    minEquity = std::min(minEquity, equity);
+
+                    if (!std::isfinite(equity) || equity < 0.0f)
+                        equity = 0.0f;
+
+                    if (equity > 1.0f)
+                        equity = 1.0f;
+
+                    multiwayEquityProxy *= equity;
                 }
 
-                float mod;
-
-                if (nOpponents == 2)
-                    mod = 0.8f;
-                else if (nOpponents == 3)
-                    mod = 0.7f;
-                else if (nOpponents == 4)
-                    mod = 0.6f;
-                else if (nOpponents == 5)
-                    mod = 0.5f;
-
-                EV = (mod * minEquity) * prms.getPossibleWinnings();
+                EV = multiwayEquityProxy * prms.getPossibleWinnings();
             }
 
             // If there are opponents and we have some money left...
@@ -1594,8 +1980,8 @@ namespace G5Cpp
         }
     } // namespace
 
-    extern "C" G5_EXPORT void __stdcall EstimateEV(float& checkCallEV, float& betRaiseEV, int buttonInd, int heroIndex, const HoleCards& heroHoleCards,
-        const PlayerDTO* players, int nPlayers, const Card* cardsInBoard, Street street, int numBets, int numCallers, int bigBlindSize, const void* gc)
+    static void EstimateEV_Internal(float& checkCallEV, float& betRaiseEV, int buttonInd, int heroIndex, const HoleCards& heroHoleCards,
+        const PlayerDTO* players, int nPlayers, const Card* cardsInBoard, Street street, int numBets, int numCallers, int bigBlindSize, const void* gc, int forcedRootBetRaiseAmount)
     {
 DMLog("===== ENTER EstimateEV =====");
 DMLogF("[DM][BUILD] %s | SHOWDOWN_ITERATIONS=%d | TCUTOFF_ITERATIONS=%d | NODE_CHANCE_CUTOFF=%.6f",
@@ -1616,8 +2002,8 @@ DMResetDiagnosticCounters();
             bigBlindSize
         );
 
-        // Inicializa os EVs para valores reconhec�veis.
-        // Estes valores N�O devem ser usados como decis�o, servem apenas para diagn�stico
+        // Inicializa os EVs para valores reconhecÃƒÂ¯Ã‚Â¿Ã‚Â½veis.
+        // Estes valores NÃƒÂ¯Ã‚Â¿Ã‚Â½O devem ser usados como decisÃƒÂ¯Ã‚Â¿Ã‚Â½o, servem apenas para diagnÃƒÂ¯Ã‚Â¿Ã‚Â½stico
         // caso a chamada seja interrompida antes de calcular os EVs reais.
         checkCallEV = -999999.0f;
         betRaiseEV = -999999.0f;
@@ -1744,7 +2130,7 @@ DMResetDiagnosticCounters();
                 DMLogRootContext("ANTES", prms);
 
             DMLog("Antes de estimateEV_HeroPlays");
-            estimateEV_HeroPlays(checkCallEV, betRaiseEV, stats, prms);
+            estimateEV_HeroPlays(checkCallEV, betRaiseEV, stats, prms, forcedRootBetRaiseAmount);
             DMLog("Depois de estimateEV_HeroPlays");
 
             if (street > Street_PreFlop)
@@ -1804,26 +2190,30 @@ DMResetDiagnosticCounters();
         }
     }
 
+    extern "C" G5_EXPORT void __stdcall EstimateEV(float& checkCallEV, float& betRaiseEV, int buttonInd, int heroIndex, const HoleCards& heroHoleCards,
+        const PlayerDTO* players, int nPlayers, const Card* cardsInBoard, Street street, int numBets, int numCallers, int bigBlindSize, const void* gc)
+    {
+        EstimateEV_Internal(checkCallEV, betRaiseEV, buttonInd, heroIndex, heroHoleCards,
+            players, nPlayers, cardsInBoard, street, numBets, numCallers, bigBlindSize, gc, 0);
+    }
+
     extern "C" G5_EXPORT void __stdcall EstimateEVForBetRaiseAmount(float& checkCallEV, float& betRaiseEV, int forcedBetRaiseAmount, int buttonInd, int heroIndex, const HoleCards& heroHoleCards,
         const PlayerDTO* players, int nPlayers, const Card* cardsInBoard, Street street, int numBets, int numCallers, int bigBlindSize, const void* gc)
     {
-        if (forcedBetRaiseAmount > 0)
-        {
-            g_DMForcedRootBetRaiseAmount = forcedBetRaiseAmount;
-            g_DMForceRootBetRaiseAmount = true;
-            DMLogF("[DM][MULTISIZE ROOT] forcedBetRaiseAmount=%d", forcedBetRaiseAmount);
-        }
-        else
-        {
-            g_DMForcedRootBetRaiseAmount = 0;
-            g_DMForceRootBetRaiseAmount = false;
-        }
+        if (forcedBetRaiseAmount < 0)
+            forcedBetRaiseAmount = 0;
 
-        EstimateEV(checkCallEV, betRaiseEV, buttonInd, heroIndex, heroHoleCards,
-            players, nPlayers, cardsInBoard, street, numBets, numCallers, bigBlindSize, gc);
+        DMLogF("[DM][MULTISIZE ROOT] forcedBetRaiseAmount=%d", forcedBetRaiseAmount);
 
-        g_DMForcedRootBetRaiseAmount = 0;
-        g_DMForceRootBetRaiseAmount = false;
+        EstimateEV_Internal(checkCallEV, betRaiseEV, buttonInd, heroIndex, heroHoleCards,
+            players, nPlayers, cardsInBoard, street, numBets, numCallers, bigBlindSize, gc, forcedBetRaiseAmount);
     }
 
+
 }
+
+
+
+
+
+

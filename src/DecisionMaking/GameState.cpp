@@ -1,6 +1,7 @@
 #include "GameState.h"
 #include <algorithm>
 #include <stdexcept>
+#include <cmath>
 
 
 namespace G5Cpp
@@ -12,6 +13,110 @@ namespace G5Cpp
         const int BETS_CUTOFF_PRE_FLOP = 3;
         const int RAISE_SIZE_NOM = 2;
         const int RAISE_SIZE_DEN = 3;
+
+        int ClampInt(int value, int minValue, int maxValue)
+        {
+            if (value < minValue)
+                return minValue;
+
+            if (value > maxValue)
+                return maxValue;
+
+            return value;
+        }
+
+        float ClampFloat(float value, float minValue, float maxValue)
+        {
+            if (value < minValue)
+                return minValue;
+
+            if (value > maxValue)
+                return maxValue;
+
+            return value;
+        }
+
+        float CalculateBoardWetnessForSizing(const Board& board)
+        {
+            if (board.size < 3)
+                return 0.50f;
+
+            int suitCount[4] = { 0, 0, 0, 0 };
+            int rankCount[15];
+
+            for (int i = 0; i < 15; i++)
+                rankCount[i] = 0;
+
+            for (int i = 0; i < board.size; i++)
+            {
+                int suit = (int)board.card[i].suit();
+                int rank = (int)board.card[i].rank();
+
+                if (suit >= 0 && suit < 4)
+                    suitCount[suit]++;
+
+                if (rank >= 2 && rank <= 14)
+                    rankCount[rank]++;
+            }
+
+            int maxSuit = 0;
+            for (int s = 0; s < 4; s++)
+                maxSuit = std::max(maxSuit, suitCount[s]);
+
+            bool paired = false;
+            for (int r = 2; r <= 14; r++)
+            {
+                if (rankCount[r] >= 2)
+                {
+                    paired = true;
+                    break;
+                }
+            }
+
+            int bestStraightWindow = 0;
+            for (int start = 2; start <= 10; start++)
+            {
+                int count = 0;
+                for (int r = start; r < start + 5; r++)
+                {
+                    if (rankCount[r] > 0)
+                        count++;
+                }
+
+                bestStraightWindow = std::max(bestStraightWindow, count);
+            }
+
+            // A-5 wheel window.
+            int wheelCount = 0;
+            if (rankCount[14] > 0) wheelCount++;
+            for (int r = 2; r <= 5; r++)
+            {
+                if (rankCount[r] > 0)
+                    wheelCount++;
+            }
+            bestStraightWindow = std::max(bestStraightWindow, wheelCount);
+
+            float wetness = 0.0f;
+
+            if (maxSuit >= 4)
+                wetness += 0.45f;
+            else if (maxSuit == 3)
+                wetness += 0.32f;
+            else if (maxSuit == 2)
+                wetness += 0.18f;
+
+            if (bestStraightWindow >= 5)
+                wetness += 0.40f;
+            else if (bestStraightWindow == 4)
+                wetness += 0.32f;
+            else if (bestStraightWindow == 3)
+                wetness += 0.25f;
+
+            if (paired)
+                wetness += 0.10f;
+
+            return ClampFloat(wetness, 0.0f, 1.0f);
+        }
     }
 
     GameState::GameState(TableType tableType, int buttonInd, int heroIndex, const HoleCards& heroHoleCards, const PlayerDTO* players, int nPlayers, const Board& aBoard, Street street,
@@ -133,7 +238,55 @@ namespace G5Cpp
             return amountToAdd;
         }
 
-        return (RAISE_SIZE_NOM * (potSize() + amountToCall)) / RAISE_SIZE_DEN + amountToCall;
+        int effectivePot = std::max(1, potSize() + amountToCall);
+        float spr = heroStack / (float)effectivePot;
+
+        // Se o SPR do no já é menor ou igual a 1, qualquer bet/raise parcial deixa
+        // uma sobra artificial e distorce a arvore. O size canonico passa a ser all-in.
+        if (spr <= 1.0f)
+            return heroStack;
+
+        float wetness = CalculateBoardWetnessForSizing(board);
+        bool facingBet = amountToCall > 0;
+        int activeNonAllIn = numActiveNonAllInPlayers();
+        float fraction = 0.0f;
+
+        if (street == Street_River && !facingBet && wetness <= 0.30f && activeNonAllIn <= 2 && spr <= 2.25f)
+        {
+            // Nó polarizado: river seco, HU e SPR que permite pressão real.
+            fraction = 1.25f;
+        }
+        else if (wetness >= 0.70f)
+        {
+            fraction = facingBet ? 0.90f : 0.80f;
+        }
+        else if (wetness <= 0.30f)
+        {
+            fraction = facingBet ? 0.55f : 0.38f;
+        }
+        else
+        {
+            fraction = facingBet ? 0.70f : 0.60f;
+        }
+
+        if (activeNonAllIn > 2 && wetness >= 0.50f && !facingBet)
+            fraction = std::max(fraction, 0.70f);
+
+        int amountToAdd = facingBet
+            ? amountToCall + (int)std::floor((effectivePot * fraction) + 0.5f)
+            : (int)std::floor((effectivePot * fraction) + 0.5f);
+
+        if (!facingBet && amountToAdd < bigBlindSize)
+            amountToAdd = bigBlindSize;
+
+        if (facingBet && amountToAdd < amountToCall)
+            amountToAdd = amountToCall;
+
+        if (amountToAdd >= (int)std::ceil(heroStack * 0.80f))
+            amountToAdd = heroStack;
+
+        amountToAdd = ClampInt(amountToAdd, 0, heroStack);
+        return amountToAdd;
     }
 
     int GameState::normalizeBetRaiseAmount(int requestedAmount) const

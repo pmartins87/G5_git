@@ -1,0 +1,14 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>netcoreapp3.1</TargetFramework>
+        <Platforms>AnyCPU</Platforms>
+        <OutputType>Exe</OutputType>
+        <Configurations>Debug;Release;Release-final</Configurations>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <ProjectReference Include="..\G5.Logic\G5.Logic.csproj" />
+    </ItemGroup>
+
+</Project>

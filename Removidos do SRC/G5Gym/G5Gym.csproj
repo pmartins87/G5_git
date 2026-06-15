@@ -1,0 +1,17 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>netcoreapp3.1</TargetFramework>
+        <Platforms>AnyCPU</Platforms>
+        <Configurations>Debug;Release;Release-final</Configurations>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <ProjectReference Include="..\G5.Logic\G5.Logic.csproj" />
+    </ItemGroup>
+
+    <Target Name="PostBuild" AfterTargets="PostBuildEvent">
+      <Exec Command="xcopy &quot;$(SolutionDir)..\redist\*.*&quot; &quot;$(SolutionDir)bin\$(ConfigurationName)\*.*&quot; /Y /I /E&#xD;&#xA;copy &quot;$(TargetDir)*.*&quot; &quot;$(SolutionDir)bin\$(ConfigurationName)\*.*&quot;&#xD;&#xA;copy &quot;$(ProjectDit)g5api.py&quot; &quot;$(SolutionDir)bin\$(ConfigurationName)\&quot;" />
+    </Target>
+
+</Project>
