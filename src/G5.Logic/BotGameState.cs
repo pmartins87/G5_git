@@ -9,6 +9,7 @@ using System.IO;
 using System.Reflection;
 
 
+// phase19: postflop sempre pela DecisionMaking.dll; sem bloqueio por complexidade.
 namespace G5.Logic
 {
     public class BotGameState : IDisposable
@@ -1899,240 +1900,17 @@ private bool heroHasStraightDrawOnFlop()
     return bestWindow >= 4;
 }
 
-private int calculateFlopHeuristicBetRaiseAmount(bool strongMadeHand, bool strongDraw, int amountToCall)
-{
-    int stack = getHero().Stack;
-    int basePot = Math.Max(1, potSize() + amountToCall);
-    int amount;
 
-    if (amountToCall > 0)
-    {
-        // Enfrentando aposta no flop: raise 50% ou all-in por regra de commitment.
-        amount = amountToCall + (int)Math.Round(basePot * 0.50f);
-    }
-    else
-    {
-        // Sem aposta no flop: bet 33%, 50% ou all-in por regra de commitment.
-        float fraction = (strongMadeHand || strongDraw) ? 0.50f : 0.33f;
-        amount = (int)Math.Round(basePot * fraction);
-    }
 
-    return clampBetAmount(amount);
-}
 
-private BotDecision calculateHeroFlopHeuristicAction(int amountToCall, int nOfOpponents)
-{
-    HandStrength handStrength = HandStrength.calculateHandStrength(_heroHoleCards, _board);
 
-    bool strongMadeHand = handStrength.rank >= HandRank.TwoPair;
-    bool weakMadeHand = handStrength.rank > HandRank.HighCard && handStrength.rank < HandRank.TwoPair;
-    bool flushDraw = heroHasFlushDrawOnFlop();
-    bool straightDraw = heroHasStraightDrawOnFlop();
-    bool strongDraw = flushDraw || straightDraw;
-    int overcards = countHeroOvercardsToBoard();
 
-    int pot = potSize();
-    float potOdds = amountToCall > 0
-        ? amountToCall / (float)Math.Max(1, pot + amountToCall)
-        : 0.0f;
 
-    bool headsUp = nOfOpponents == 1;
-    bool inPosition = isPlayerInPosition(_heroInd);
+        
 
-    BotDecision bd = new BotDecision
-    {
-        actionType = ActionType.Check,
-        byAmount = 0,
-        checkCallEV = 0.0f,
-        betRaiseEV = 0.0f,
-        timeSpentSeconds = 0,
-        message = "",
-        usedMultiSizeEV = false,
-        sizingReport = ""
-    };
 
-    bd.message += " -> FLOP HEURISTICO: DecisionMaking.dll nao foi chamada no flop.\n";
-    bd.message += $" -> Heuristica flop: hand={handStrength.rank}, strongMade={strongMadeHand}, weakMade={weakMadeHand}, flushDraw={flushDraw}, straightDraw={straightDraw}, overcards={overcards}, potOdds={potOdds:P1}, HU={headsUp}, IP={inPosition}.\n";
+        
 
-    if (amountToCall > 0)
-    {
-        if (strongMadeHand)
-        {
-            bd.actionType = ActionType.Raise;
-            bd.byAmount = calculateFlopHeuristicBetRaiseAmount(true, false, amountToCall);
-            bd.checkCallEV = 6.0f;
-            bd.betRaiseEV = 10.0f;
-            bd.message += " -> Facing bet: mao forte feita no flop, raise por valor.\n";
-        }
-        else if (strongDraw && headsUp && potOdds <= 0.33f)
-        {
-            bd.actionType = ActionType.Raise;
-            bd.byAmount = calculateFlopHeuristicBetRaiseAmount(false, true, amountToCall);
-            bd.checkCallEV = 5.0f;
-            bd.betRaiseEV = 7.0f;
-            bd.message += " -> Facing bet: draw forte HU com pot odds aceitaveis, semi-bluff raise 50%.\n";
-        }
-        else if (strongDraw && potOdds <= 0.38f)
-        {
-            bd.actionType = ActionType.Call;
-            bd.byAmount = amountToCall;
-            bd.checkCallEV = 5.0f;
-            bd.betRaiseEV = 2.0f;
-            bd.message += " -> Facing bet: draw forte, call por odds/realizacao.\n";
-        }
-        else if (weakMadeHand && potOdds <= 0.30f)
-        {
-            bd.actionType = ActionType.Call;
-            bd.byAmount = amountToCall;
-            bd.checkCallEV = 4.0f;
-            bd.betRaiseEV = 1.0f;
-            bd.message += " -> Facing bet: par/SDV fraco com preco aceitavel, call.\n";
-        }
-        else if (overcards >= 2 && headsUp && potOdds <= 0.20f)
-        {
-            bd.actionType = ActionType.Call;
-            bd.byAmount = amountToCall;
-            bd.checkCallEV = 2.0f;
-            bd.betRaiseEV = 0.0f;
-            bd.message += " -> Facing bet: duas overcards HU e preco muito baixo, call.\n";
-        }
-        else
-        {
-            bd.actionType = ActionType.Fold;
-            bd.byAmount = 0;
-            bd.checkCallEV = -amountToCall;
-            bd.betRaiseEV = -amountToCall - 1.0f;
-            bd.message += " -> Facing bet: sem equity suficiente para continuar, fold.\n";
-        }
-
-        return bd;
-    }
-
-    if (strongMadeHand)
-    {
-        bd.actionType = ActionType.Bet;
-        bd.byAmount = calculateFlopHeuristicBetRaiseAmount(true, false, 0);
-        bd.checkCallEV = 5.0f;
-        bd.betRaiseEV = 9.0f;
-        bd.message += " -> Sem aposta: mao forte feita, bet 50% por valor/protecao.\n";
-    }
-    else if (strongDraw && headsUp)
-    {
-        bd.actionType = ActionType.Bet;
-        bd.byAmount = calculateFlopHeuristicBetRaiseAmount(false, true, 0);
-        bd.checkCallEV = 4.0f;
-        bd.betRaiseEV = 7.0f;
-        bd.message += " -> Sem aposta: draw forte HU, bet 50% como semi-bluff.\n";
-    }
-    else if (!weakMadeHand && overcards >= 2 && headsUp && inPosition && calculateBoardWetnessForSizing() < 0.35f)
-    {
-        bd.actionType = ActionType.Bet;
-        bd.byAmount = calculateFlopHeuristicBetRaiseAmount(false, false, 0);
-        bd.checkCallEV = 2.0f;
-        bd.betRaiseEV = 3.0f;
-        bd.message += " -> Sem aposta: duas overcards em board seco HU IP, bet 33%.\n";
-    }
-    else
-    {
-        bd.actionType = ActionType.Check;
-        bd.byAmount = 0;
-        bd.checkCallEV = 2.0f;
-        bd.betRaiseEV = 0.0f;
-        bd.message += " -> Sem aposta: check por showdown/pot-control/semibluff insuficiente.\n";
-    }
-
-    return bd;
-}
-
-        private bool shouldUseSynchronousCanonicalTreePostFlop(int nOfOpponents)
-        {
-            if (_street == Street.PreFlop)
-                return true;
-
-            // A arvore completa nativa ainda e util academicamente, mas nao pode ser chamada
-            // no caminho sincronico do OpenHoldem quando o branching explode. O log mostrou
-            // travamento no flop multiway antes de qualquer DECISAO retornar.
-            if (_street == Street.Flop)
-                return false;
-
-            // Em multiway, mesmo turn/river podem gerar arvore muito grande por ranges e
-            // respostas encadeadas. Mantemos a arvore canonica sincronica apenas em HU.
-            return nOfOpponents == 1;
-        }
-
-        private BotDecision calculateHeroRuntimeSafePostFlopAction(int amountToCall, int nOfOpponents, string reason)
-        {
-            BotDecision bd;
-
-            if (_street == Street.Flop)
-            {
-                bd = calculateHeroFlopHeuristicAction(amountToCall, nOfOpponents);
-                bd.message = $" -> RuntimeSafePostFlop: {reason}. Flop usa avaliador topologico bounded para nao bloquear o OH; sem FastEV multi-size.\n" + bd.message;
-                return bd;
-            }
-
-            HandStrength handStrength = HandStrength.calculateHandStrength(_heroHoleCards, _board);
-            bool strongMadeHand = handStrength.rank >= HandRank.TwoPair;
-            bool madeHand = handStrength.rank > HandRank.HighCard;
-            int pot = potSize();
-            float potOdds = amountToCall > 0
-                ? amountToCall / (float)Math.Max(1, pot + amountToCall)
-                : 0.0f;
-            bool cheapCall = amountToCall > 0 && potOdds <= 0.20f;
-
-            bd = new BotDecision
-            {
-                actionType = ActionType.Check,
-                byAmount = 0,
-                checkCallEV = 0.0f,
-                betRaiseEV = 0.0f,
-                timeSpentSeconds = 0,
-                message = $" -> RuntimeSafePostFlop: {reason}. Turn/River multiway usa avaliador bounded para nao bloquear o OH; sem FastEV multi-size.\n",
-                usedMultiSizeEV = false,
-                sizingReport = ""
-            };
-
-            if (amountToCall > 0)
-            {
-                bd.byAmount = amountToCall;
-
-                if (strongMadeHand || (madeHand && cheapCall))
-                {
-                    bd.actionType = ActionType.Call;
-                    bd.checkCallEV = Math.Max(0.1f, pot * 0.20f);
-                    bd.betRaiseEV = -1.0f;
-                    bd.message += $" -> Enfrentando aposta: {handStrength.rank}, potOdds={potOdds:P1}; Call bounded.\n";
-                }
-                else
-                {
-                    bd.actionType = ActionType.Fold;
-                    bd.checkCallEV = -amountToCall;
-                    bd.betRaiseEV = -1.0f;
-                    bd.message += $" -> Enfrentando aposta: {handStrength.rank}, potOdds={potOdds:P1}; Fold bounded.\n";
-                }
-
-                return bd;
-            }
-
-            if (strongMadeHand && canHeroBetRaiseNow())
-            {
-                bd.actionType = ActionType.Bet;
-                bd.byAmount = calculatePostFlopBetRaiseAmount(0.0f, 1.0f);
-                bd.checkCallEV = Math.Max(0.1f, pot * 0.25f);
-                bd.betRaiseEV = bd.checkCallEV + Math.Max(0.1f, pot * 0.10f);
-                bd.message += $" -> Sem aposta: {handStrength.rank}; Bet bounded via ExecutionSizingPolicy.\n";
-            }
-            else
-            {
-                bd.actionType = ActionType.Check;
-                bd.byAmount = 0;
-                bd.checkCallEV = Math.Max(0.1f, pot * 0.10f);
-                bd.betRaiseEV = -1.0f;
-                bd.message += $" -> Sem aposta: {handStrength.rank}; Check bounded.\n";
-            }
-
-            return bd;
-        }
 
         private bool tryEvaluatePostFlopMultiSizeEV(ref BotDecision bd)
         {
@@ -2427,122 +2205,122 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
                 return bd;
             }
 
-var startTime = DateTime.Now;
-int amountToCall = getAmountToCall();
+            DateTime startTime = DateTime.Now;
+            int amountToCall = getAmountToCall();
 
-if (_street == Street.PreFlop)
-{
-    BotDecision chartDecision;
-
-    if (tryCalculateHeroPreFlopChartActionFast(amountToCall, startTime, out chartDecision))
-        return chartDecision;
-}
-
-// Pos-flop no caminho sincronico do OpenHoldem precisa de gate de complexidade.
-// A arvore completa canonica continua existindo, mas so e chamada quando o branching
-// e compativel com decisao em tempo real. Caso contrario, usamos avaliador bounded
-// de acao abstrata com ExecutionSizingPolicy, sem FastEV multi-size.
-if (_street != Street.PreFlop && !shouldUseSynchronousCanonicalTreePostFlop(nOfOpponents))
-{
-    string reason = $"arvore canonica sincronica bloqueada por complexidade: street={_street}, oponentes={nOfOpponents}";
-    bd = calculateHeroRuntimeSafePostFlopAction(amountToCall, nOfOpponents, reason);
-    bd.timeSpentSeconds = (DateTime.Now - startTime).TotalSeconds;
-
-    if (IsAtLeastAllInCommitmentThreshold(bd.byAmount, _players[_heroInd].Stack))
-    {
-        bd.message += $" -> But amount to put in pot is at least {_allInCommitmentPercent}% of player's stack, so go all in!\n";
-        bd.byAmount = _players[_heroInd].Stack;
-        bd.actionType = ActionType.AllIn;
-    }
-
-    appendAcademicDecisionDiagnostics(ref bd, amountToCall, nOfOpponents);
-    bd.message = bd.message.Trim();
-    return bd;
-}
-
-// If we are post flop with many opponents than its too time consumming to calculate.
-if (nOfOpponents < 4 || _street == Street.PreFlop)
-{
-    _actionEstimator.estimateEV(out bd.checkCallEV, out bd.betRaiseEV, this);
-}
-            else
+            if (_street == Street.PreFlop)
             {
-                // If amountToCall is 0, it can check
-                bd.checkCallEV = -amountToCall;
-                bd.betRaiseEV = -10.0f;
+                BotDecision chartDecision;
+
+                if (tryCalculateHeroPreFlopChartActionFast(amountToCall, startTime, out chartDecision))
+                    return chartDecision;
             }
 
-if (_street != Street.PreFlop)
-{
-    bd.message += " -> Arvore canonica pos-flop: EV calculado sem FastPostFlopEV e sem reavaliacao multi-size.\n";
-}
+            bool isPostFlop = _street != Street.PreFlop;
+            bool canBetRaise = canHeroBetRaiseNow();
 
-            // Try to read preflop charts
-            var pfcActionDistribution = _preFlopCharts.GetActionDistribution(this, _preFlopChartsLevel);
-
-            if (pfcActionDistribution != null)
+            if (isPostFlop)
             {
-                var heroPos = getHero().PreFlopPosition;
-                var villainPos = (_bettors.Count > 0) ? _bettors.Last() : Position.Empty;
+                int rootBetRaiseAmount = canBetRaise ? calculatePostFlopBetRaiseAmount(0.0f, 1.0f) : 0;
+                Estimators.IBetRaiseAmountEstimator amountEstimator = _actionEstimator as Estimators.IBetRaiseAmountEstimator;
 
-                bd.message += $" -> We have pre-flop chart for this situation (Hero pos {heroPos}, villianPos {villainPos}, num bets {_numBets}, num callers {_numCallers}).\n";
-bd.message += $" -> Preflop chart set: {getPreFlopChartsInfo()}.\n";
-bd.message += $" -> Chart lookup: {_preFlopCharts.LastLookupInfo}.\n";
-bd.message += $" -> We are reading AD, allin prob {pfcActionDistribution.allinProb} br prob {pfcActionDistribution.brProb}, cc prob {pfcActionDistribution.ccProb} (Modeling estimator gave br {bd.betRaiseEV:F2} cc {bd.checkCallEV:F2}).\n";
-                bd.actionType = pfcActionDistribution.sample(_rng);
-                bd.message += $" -> Sampled action is {bd.actionType}";
-            }
-            else
-            {
-                if (_street == Street.PreFlop)
+                if (amountEstimator != null && rootBetRaiseAmount > 0)
                 {
-                    var heroPos = getHero().PreFlopPosition;
-                    var villainPos = (_bettors.Count > 0) ? _bettors.Last() : Position.Empty;
-                    bd.message += $" -> We do NOT have pre-flop chart for this situation (Hero pos {heroPos}, villianPos {villainPos}, num bets {_numBets}, num callers {_numCallers}).\n";
-                    bd.message += $" -> Preflop chart set: {getPreFlopChartsInfo()}.\n";
+                    amountEstimator.estimateEVForBetRaiseAmount(
+                        out bd.checkCallEV,
+                        out bd.betRaiseEV,
+                        this,
+                        rootBetRaiseAmount);
 
-if (_numBets == 0 && _numCallers > 0)
-{
-    bd.message += $" -> Spot identificado como open limp/limp antes do heroi.\n";
-    bd.message += $" -> Chart lookup: {_preFlopCharts.LastLookupInfo}.\n";
-}
-                }
-
-                bd.message += $" -> Using modeling estimator result br {bd.betRaiseEV:F2} cc {bd.checkCallEV:F2}.\n";
-
-                if (bd.checkCallEV < 0 && bd.betRaiseEV <= 0)
-                {
-                    bd.actionType = ActionType.Fold;
-                    bd.message += " -> Both EVs are less then 0 so fold.\n";
-                }
-                /*else if (isProblematicSituation(bd.betRaiseEV, bd.checkCallEV))
-                {
-                    // In case of problematic situation mix strategy a bit.
-                    bd.actionType = randomSampleAction(bd.betRaiseEV, bd.checkCallEV);
-                    bd.message += $" -> This is problematic situation in position after flop after opponent checks. Mix strategy. Randomly sampling {bd.actionType}.\n";
-                }*/
-                else if (_randomlySampleActions && bd.checkCallEV > 0 && bd.betRaiseEV > 0)
-                {
-                    bd.actionType = randomSampleAction(bd.betRaiseEV, bd.checkCallEV);
-                    bd.message += $" -> Both EVs are positive. Randomly sampling {bd.actionType}.\n";
-                }
-                else if (bd.checkCallEV > bd.betRaiseEV)
-                {
-                    bd.actionType = ActionType.Call;
-                    bd.message += " -> Check/call EV is positive and larger than bet/raise EV so check/call.\n";
+                    bd.message += $" -> FullTreePostFlop: DecisionMaking.dll chamada via EstimateEVForBetRaiseAmount; sizeRaizExecucao={rootBetRaiseAmount}; decisao pos-flop exclusiva pela arvore. {_lastExecutionSizingReason}\n";
                 }
                 else
                 {
-                    bd.actionType = ActionType.Raise;
-                    bd.message += " -> Bet/raise EV is positive and larger than check/call EV so bet/raise.\n";
+                    _actionEstimator.estimateEV(out bd.checkCallEV, out bd.betRaiseEV, this);
+                    bd.message += " -> FullTreePostFlop: DecisionMaking.dll chamada via EstimateEV; decisao pos-flop exclusiva pela arvore.\n";
                 }
+
+                if (float.IsNaN(bd.checkCallEV) || float.IsInfinity(bd.checkCallEV) ||
+                    float.IsNaN(bd.betRaiseEV) || float.IsInfinity(bd.betRaiseEV))
+                {
+                    throw new InvalidOperationException(
+                        $"FullTreePostFlop: DecisionMaking.dll retornou EV invalido: cc={bd.checkCallEV}, br={bd.betRaiseEV}.");
+                }
+
+                bd.message += $" -> FullTreePostFlop: caminho pos-flop exclusivo da arvore; nenhum avaliador bounded e nenhum bloqueio por complexidade; street={_street}, oponentes={nOfOpponents}, amountToCall={amountToCall}, canBetRaise={canBetRaise}, rootBetRaiseAmount={rootBetRaiseAmount}.\n";
+
+                if (amountToCall > 0)
+                {
+                    if (canBetRaise && bd.betRaiseEV > bd.checkCallEV && bd.betRaiseEV > 0.0f)
+                    {
+                        bd.actionType = ActionType.Raise;
+                        bd.byAmount = rootBetRaiseAmount;
+                        bd.message += " -> Bet/raise EV e positivo e supera check/call EV; escolhendo Raise pela arvore.\n";
+                    }
+                    else if (bd.checkCallEV >= 0.0f)
+                    {
+                        bd.actionType = ActionType.Call;
+                        bd.byAmount = amountToCall;
+                        bd.message += " -> Check/call EV e nao negativo; escolhendo Call pela arvore.\n";
+                    }
+                    else
+                    {
+                        bd.actionType = ActionType.Fold;
+                        bd.byAmount = 0;
+                        bd.message += " -> Check/call EV e negativo e raise nao supera; escolhendo Fold pela arvore.\n";
+                    }
+                }
+                else
+                {
+                    if (canBetRaise && bd.betRaiseEV > bd.checkCallEV)
+                    {
+                        bd.actionType = ActionType.Bet;
+                        bd.byAmount = rootBetRaiseAmount;
+                        bd.message += " -> Bet/raise EV supera check EV; escolhendo Bet pela arvore.\n";
+                    }
+                    else
+                    {
+                        bd.actionType = ActionType.Check;
+                        bd.byAmount = 0;
+                        bd.message += " -> Check EV e maior ou igual ao bet EV; escolhendo Check pela arvore.\n";
+                    }
+                }
+
+                if (IsAtLeastAllInCommitmentThreshold(bd.byAmount, _players[_heroInd].Stack))
+                {
+                    bd.message += $" -> Amount escolhido atingiu {_allInCommitmentPercent}% do stack restante; convertendo para AllIn por regra de commitment configurada no G5.\n";
+                    bd.byAmount = _players[_heroInd].Stack;
+                    bd.actionType = ActionType.AllIn;
+                }
+
+                bd.timeSpentSeconds = (DateTime.Now - startTime).TotalSeconds;
+                appendAcademicDecisionDiagnostics(ref bd, amountToCall, nOfOpponents);
+                bd.message = bd.message.Trim();
+                return bd;
+            }
+
+            _actionEstimator.estimateEV(out bd.checkCallEV, out bd.betRaiseEV, this);
+            bd.message += $" -> Preflop sem chart direta: usando ModelingEstimator br {bd.betRaiseEV:F2} cc {bd.checkCallEV:F2}.\n";
+
+            if (bd.checkCallEV < 0 && bd.betRaiseEV <= 0)
+            {
+                bd.actionType = ActionType.Fold;
+                bd.message += " -> Both EVs are less then 0 so fold.\n";
+            }
+            else if (bd.checkCallEV > bd.betRaiseEV)
+            {
+                bd.actionType = amountToCall > 0 ? ActionType.Call : ActionType.Check;
+                bd.message += " -> Check/call EV is positive and larger than bet/raise EV so check/call.\n";
+            }
+            else
+            {
+                bd.actionType = ActionType.Raise;
+                bd.message += " -> Bet/raise EV is positive and larger than check/call EV so bet/raise.\n";
             }
 
             bd.timeSpentSeconds = (DateTime.Now - startTime).TotalSeconds;
-            if (!bd.usedMultiSizeEV)
-                bd.byAmount = 0;
+            bd.byAmount = 0;
 
-            // If both EVs are less than zero then fold
             if (bd.actionType == ActionType.Fold)
             {
                 bd.byAmount = 0;
@@ -2563,22 +2341,9 @@ if (_numBets == 0 && _numCallers > 0)
                     bd.actionType = ActionType.Check;
                 }
             }
-            else // its raise
+            else
             {
-                if (bd.byAmount <= 0)
-                {
-                    int canonicalTreeAmount = getRaiseAmount();
-                    bd.byAmount = calculatePostFlopBetRaiseAmount(bd.checkCallEV, bd.betRaiseEV);
-
-                    if (_street != Street.PreFlop)
-                    {
-                        bd.message += $" -> ExecutionSizingPolicy: arvore avaliou size canonico {canonicalTreeAmount}; execucao escolheu {bd.byAmount}. {_lastExecutionSizingReason}\n";
-                    }
-                }
-                else if (bd.usedMultiSizeEV)
-                {
-                    bd.message += $" -> AVISO: usedMultiSizeEV estava ativo, mas esta fase deprecia multi-size; mantendo byAmount={bd.byAmount}.\n";
-                }
+                bd.byAmount = getRaiseAmount();
             }
 
             if (IsAtLeastAllInCommitmentThreshold(bd.byAmount, _players[_heroInd].Stack))
@@ -2589,10 +2354,7 @@ if (_numBets == 0 && _numCallers > 0)
             }
 
             appendAcademicDecisionDiagnostics(ref bd, amountToCall, nOfOpponents);
-
-            // Remove all leading and traiing white-space characters 
             bd.message = bd.message.Trim();
-
             return bd;
         }
 
@@ -2602,3 +2364,6 @@ if (_numBets == 0 && _numCallers > 0)
         }
     }
 }
+
+
+

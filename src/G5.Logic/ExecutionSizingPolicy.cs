@@ -54,14 +54,26 @@ namespace G5.Logic
             PostFlopLineClass line = context != null ? context.LineClass : PostFlopLineClass.Unknown;
             BoardTextureClass texture = context != null ? context.BoardTexture : BoardTextureClass.Unknown;
             bool facingBet = amountToCall > 0;
-            float fraction = SelectFraction(line, texture, facingBet, plannedAction);
+            float fraction = facingBet
+                ? SelectFacingBetRaiseFraction(line)
+                : SelectOpenActionFraction(line, texture, plannedAction);
 
+            string sizingMode = facingBet ? "raise-vs-bet two-size cap" : "open-action topology sizing";
             int amount;
 
             if (facingBet)
+            {
+                // Ao enfrentar aposta, o size de execucao deve permanecer em uma arvore
+                // pequena e auditavel: raise baixo = call + 33% do pote depois do call;
+                // raise alto = call + 50% do pote depois do call. O size canonico da
+                // arvore continua informativo para a escolha abstrata Raise, mas nao pode
+                // empurrar a execucao para 75%/85%/all-in sem uma reavaliacao explicita.
                 amount = amountToCall + (int)Math.Round(basePot * fraction);
+            }
             else
+            {
                 amount = (int)Math.Round(basePot * fraction);
+            }
 
             if (amount < bigBlind && amountToCall == 0)
                 amount = bigBlind;
@@ -69,9 +81,11 @@ namespace G5.Logic
             if (amountToCall > 0 && amount <= amountToCall)
                 amount = amountToCall + bigBlind;
 
-            // O size canonico da arvore e o piso estrutural para nao executar uma
-            // agressao menor do que aquela avaliada no ramo Bet/Raise.
-            if (canonicalTreeAmount > 0 && amount < canonicalTreeAmount)
+            // Fora de facing-bet, preservamos o piso canonico da arvore. Em facing-bet,
+            // o objetivo desta camada e exatamente limitar a execucao a 33%/50% do pote,
+            // evitando que o piso canonico ou uma classe topologica transforme um raise
+            // marginalmente melhor que call em size desproporcional.
+            if (!facingBet && canonicalTreeAmount > 0 && amount < canonicalTreeAmount)
                 amount = canonicalTreeAmount;
 
             if (amount > stack)
@@ -81,16 +95,17 @@ namespace G5.Logic
             {
                 Amount = amount,
                 Reason = string.Format(
-                    "LineContext={0}, textura={1}, facingBet={2}, fracaoExecucao={3:F2}, sizeCanonicoArvore={4}.",
+                    "LineContext={0}, textura={1}, facingBet={2}, modo={3}, fracaoExecucao={4:F2}, sizeCanonicoArvore={5}.",
                     line,
                     texture,
                     facingBet,
+                    sizingMode,
                     fraction,
                     canonicalTreeAmount)
             };
         }
 
-        private static float SelectFraction(PostFlopLineClass line, BoardTextureClass texture, bool facingBet, ActionType plannedAction)
+        private static float SelectOpenActionFraction(PostFlopLineClass line, BoardTextureClass texture, ActionType plannedAction)
         {
             bool wet = texture == BoardTextureClass.Wet || texture == BoardTextureClass.Monotone;
             bool paired = texture == BoardTextureClass.Paired;
@@ -143,13 +158,31 @@ namespace G5.Logic
                 case PostFlopLineClass.GenericBet:
                 case PostFlopLineClass.Unknown:
                 default:
-                    if (facingBet)
-                        return wet ? 0.75f : 0.66f;
-
                     if (paired)
                         return 0.50f;
 
                     return wet ? 0.66f : 0.50f;
+            }
+        }
+
+        private static float SelectFacingBetRaiseFraction(PostFlopLineClass line)
+        {
+            switch (line)
+            {
+                case PostFlopLineClass.CheckRaise:
+                case PostFlopLineClass.RaiseVsCBet:
+                case PostFlopLineClass.RaiseVsDonk:
+                case PostFlopLineClass.RaiseVsProbe:
+                case PostFlopLineClass.RaiseVsFloat:
+                case PostFlopLineClass.RaiseVsDelayedCBet:
+                case PostFlopLineClass.RaiseVsGenericBet:
+                case PostFlopLineClass.ReRaise:
+                case PostFlopLineClass.AllInPolarized:
+                case PostFlopLineClass.GenericRaise:
+                    return 0.50f;
+
+                default:
+                    return 0.33f;
             }
         }
     }

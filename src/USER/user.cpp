@@ -35,13 +35,14 @@ struct DecisionResult {
 
 enum G5Action {
     ACT_FOLD = 0, ACT_CHECK = 1, ACT_CALL = 2,
-    ACT_BET = 3, ACT_RAISE = 4, ACT_ALLIN = 5
+    ACT_BET = 3, ACT_RAISE = 4, ACT_ALLIN = 5,
+    ACT_NOACTION = 8
 };
 
 // =============================================================================
 // ROTA DE DECISAO
 //
-// O pos-flop nao usa mais PrWin do OpenHoldem.
+// O pos-flop nao usa mais equity do OpenHoldem do OpenHoldem.
 // A user.dll apenas sincroniza o estado raspado do OH e delega a decisao para
 // G5Bridge_GetDecision, que chama BotGameState/DecisionMaking.dll.
 // =============================================================================
@@ -72,6 +73,7 @@ typedef void(__stdcall* FN_DealHoleCards)(const char* card0, const char* card1);
 typedef void(__stdcall* FN_NewAction)    (int playerIndex, int actionType, int byAmount);
 typedef void(__stdcall* FN_GoToNextStreet)(const char* c0, const char* c1, const char* c2, int numCards);
 typedef DecisionResult(__stdcall* FN_GetDecision)();
+typedef void(__stdcall* FN_WarmUp)(const char* basePath);
 typedef void(__stdcall* FN_SetRuntimeConfig)(
     int logCompleto,
     int logRangesCompletos,
@@ -88,7 +90,9 @@ static FN_NewAction      pNewAction = nullptr;
 static FN_GoToNextStreet pGoToNextStreet = nullptr;
 static FN_GetDecision                  pGetDecision = nullptr;
 static FN_SetRuntimeConfig             pSetRuntimeConfig = nullptr;
+static FN_WarmUp                       pWarmUp = nullptr;
 static bool                            g_bridgeLoaded = false;
+static bool                            g_bridgeWarmUpDone = false;
 
 static bool g_loggedMsgLoad = false;
 static bool g_loggedMsgUnload = false;
@@ -163,6 +167,161 @@ static bool IsAtLeastConfiguredPercentOf(int intended, int realAllInAmount) {
 static bool IsPostFlopStreet(int ohStreet)
 {
     return ohStreet >= 2 && ohStreet <= 4;
+}
+
+static int AbsInt(int v)
+{
+    return v < 0 ? -v : v;
+}
+
+static int RoundDivInt(int value, int divisor)
+{
+    if (divisor <= 0) return 0;
+    return (value + divisor / 2) / divisor;
+}
+
+static int EstimateOHBetPotTotalCents(int numerator, int denominator)
+{
+    if (denominator <= 0) return 0;
+
+    int pot = ReadCents("pot");
+    int call = ReadCents("call");
+    int heroBet = ReadChairCurrentBet(g_heroChair);
+    int potAfterCall = pot + call;
+
+    if (potAfterCall <= 0)
+        return 0;
+
+    return heroBet + call + RoundDivInt(potAfterCall * numerator, denominator);
+}
+
+static bool ResolveOpenPPLActionConstant(const char* actionName, double* outValue)
+{
+    if (!outValue) return false;
+
+    double v = GetOHActionSymbolSafe(actionName, 0.0);
+
+    // OpenPPL action constants are large negative numbers.
+    // Positive numbers are interpreted by OpenHoldem as custom betsize in BB.
+    if (v < -1000.0)
+    {
+        *outValue = v;
+        return true;
+    }
+
+    WriteLog("[user.cpp] AVISO: simbolo OpenPPL '%s' nao resolveu como constante de acao (%.3f).\n",
+        actionName ? actionName : "<null>", v);
+    return false;
+}
+
+
+static double NoActionOpenPPLReturnValue()
+{
+    double beep = 0.0;
+    if (ResolveOpenPPLActionConstant("Beep", &beep))
+        return beep;
+
+    WriteLog("[user.cpp] AVISO: Beep nao disponivel para NoAction; retornando 0.0.\n");
+    return 0.0;
+}
+
+static bool TrySelectBetButtonForRaise(const DecisionResult& decision, int ohStreet, int bb, std::string& buttonName, double& buttonReturn)
+{
+    buttonName.clear();
+    buttonReturn = 0.0;
+
+    if (bb <= 0)
+        return false;
+
+    if (decision.actionType != ACT_BET && decision.actionType != ACT_RAISE)
+        return false;
+
+    int intendedTotal = decision.byAmount;
+    if (intendedTotal <= 0)
+        return false;
+
+    int amountToCall = ReadCents("call");
+
+    // Preflop: somente o primeiro raise usa bet button.
+    // Na mesa, o botao 1/2 pot corresponde ao open raise padrao de 3x.
+    // Em 3bet/4bet/squeeze preflop, os bet buttons nao ficam disponiveis de forma confiavel;
+    // nesses casos usamos valor customizado em BB.
+    if (ohStreet == 1)
+    {
+        if (amountToCall == 0)
+        {
+            double actionCode = 0.0;
+            if (ResolveOpenPPLActionConstant("RaiseHalfPot", &actionCode))
+            {
+                buttonName = "RaiseHalfPot";
+                buttonReturn = actionCode;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    if (!IsPostFlopStreet(ohStreet))
+        return false;
+
+    struct Candidate
+    {
+        const char* name;
+        int numerator;
+        int denominator;
+    };
+
+    static const Candidate candidates[] =
+    {
+        { "RaiseThirdPot",    1, 3 },
+        { "RaiseHalfPot",     1, 2 },
+        { "RaiseTwoThirdPot", 2, 3 }
+    };
+
+    int bestDiff = 1000000000;
+    const Candidate* best = nullptr;
+    int bestExpected = 0;
+
+    for (const Candidate& c : candidates)
+    {
+        int expected = EstimateOHBetPotTotalCents(c.numerator, c.denominator);
+        if (expected <= 0)
+            continue;
+
+        int diff = AbsInt(expected - intendedTotal);
+        if (diff < bestDiff)
+        {
+            bestDiff = diff;
+            best = &c;
+            bestExpected = expected;
+        }
+    }
+
+    // Tolerancia estreita: evita clicar botao quando a estrategia pediu outro size real.
+    // Um centavo cobre arredondamentos do OH e da policy do G5.
+    if (best && bestDiff <= 1)
+    {
+        double actionCode = 0.0;
+        if (ResolveOpenPPLActionConstant(best->name, &actionCode))
+        {
+            buttonName = best->name;
+            buttonReturn = actionCode;
+            WriteLog("[user.cpp] BetButton escolhido: %s | alvoG5=$%.2f | alvoOHestimado=$%.2f | diff=%d cent.\n",
+                best->name, intendedTotal / 100.0, bestExpected / 100.0, bestDiff);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static double CustomBetsizeReturnInBigBlinds(int raiseToTotal, int bb)
+{
+    if (bb <= 0 || raiseToTotal <= 0)
+        return 0.0;
+
+    return (double)raiseToTotal / (double)bb;
 }
 
 static double ReadOHSymbolSafe(const char* symbol)
@@ -264,6 +423,7 @@ static const char* ActionName(int a) {
     case ACT_BET:   return "Bet";
     case ACT_RAISE: return "Raise";
     case ACT_ALLIN: return "AllIn";
+    case ACT_NOACTION: return "NoAction";
     default:        return "?";
     }
 }
@@ -918,6 +1078,7 @@ static void InitializeBridge() {
     pGoToNextStreet = (FN_GoToNextStreet)GetProcAddress(hBridge, "G5Bridge_GoToNextStreet");
 pGetDecision = (FN_GetDecision)GetProcAddress(hBridge, "G5Bridge_GetDecision");
 pSetRuntimeConfig = (FN_SetRuntimeConfig)GetProcAddress(hBridge, "G5Bridge_SetRuntimeConfig");
+pWarmUp = (FN_WarmUp)GetProcAddress(hBridge, "G5Bridge_WarmUp");
 
 if (pNewHand && pDealHoleCards && pNewAction && pGoToNextStreet && pGetDecision) {
     g_bridgeLoaded = true;
@@ -929,11 +1090,32 @@ if (pNewHand && pDealHoleCards && pNewAction && pGoToNextStreet && pGetDecision)
     }
 }
 
+
+static void WarmUpBridgeIfPossible(const char* source)
+{
+    InitializeBridge();
+
+    if (!g_bridgeLoaded || !pWarmUp || g_bridgeWarmUpDone)
+        return;
+
+    __try
+    {
+        WriteLog("[user.cpp] WarmUp G5Bridge iniciado por %s.\n", source ? source : "<unknown>");
+        pWarmUp(g_g5BasePath);
+        g_bridgeWarmUpDone = true;
+        WriteLog("[user.cpp] WarmUp G5Bridge concluido.\n");
+    }
+    __except (1)
+    {
+        WriteLog("[user.cpp] EXCECAO durante WarmUp G5Bridge. Continuando sem warmup.\n");
+    }
+}
+
 // =============================================================================
 // PROCESS_MESSAGE DO OPENHOLDEM
 //
 // Mantemos a interface canonica do OH para load/unload/state/phl1k/query.
-// Mensagens de PrWin sao ignoradas porque a decisao pos-flop
+// Mensagens de equity do OpenHoldem sao ignoradas porque a decisao pos-flop
 // agora vem exclusivamente da DecisionMaking.dll via G5Bridge_GetDecision.
 // =============================================================================
 static void LogOpenHoldemMessageOnce(const char* message, bool& flag)
@@ -953,6 +1135,7 @@ static double HandleOpenHoldemMessage(const char* message, const void* param)
     if (strcmp(message, "load") == 0)
     {
         LogOpenHoldemMessageOnce("load", g_loggedMsgLoad);
+        WarmUpBridgeIfPossible("process_message(load)");
         return 0.0;
     }
 
@@ -1000,9 +1183,9 @@ extern "C" __declspec(dllexport) double process_query(const char* pquery)
 // =============================================================================
 // STUBS DO OPENHOLDEM
 // =============================================================================
-void DLLOnLoad() {} void DLLOnUnLoad() {}
+void DLLOnLoad() { WarmUpBridgeIfPossible("DLLOnLoad"); } void DLLOnUnLoad() {}
 void __stdcall DLLUpdateOnNewFormula() {}
-void __stdcall DLLUpdateOnConnection() {}
+void __stdcall DLLUpdateOnConnection() { WarmUpBridgeIfPossible("DLLUpdateOnConnection"); }
 void __stdcall DLLUpdateOnHandreset() {}
 void __stdcall DLLUpdateOnNewRound() {}
 void __stdcall DLLUpdateOnMyTurn() {}
@@ -1016,10 +1199,16 @@ DLL_IMPLEMENTS double __stdcall ProcessQuery(const char* pquery)
     if (!pquery) return 0;
 
     if (strncmp(pquery, "dll$betsize", 11) == 0)
-        return (double)g_cachedByAmount;
+        return (double)g_cachedByAmount / 100.0;
 
     InitializeBridge();
-    if (!g_bridgeLoaded) return 0;
+    if (!g_bridgeLoaded)
+    {
+        if (strncmp(pquery, "dll$decisao", 11) == 0)
+            return NoActionOpenPPLReturnValue();
+
+        return 0.0;
+    }
     SendRuntimeConfigToBridge();
     if (strncmp(pquery, "dll$decisao", 11) != 0) return 0;
 
@@ -1042,7 +1231,8 @@ DLL_IMPLEMENTS double __stdcall ProcessQuery(const char* pquery)
         g_heroChair = heroChair;
         g_buttonChair = buttonChair;
 
-        if (!Step_InitNewHand(heroChair, buttonChair, bigBlind)) return 0.0;
+        if (!Step_InitNewHand(heroChair, buttonChair, bigBlind))
+            return NoActionOpenPPLReturnValue();
 
         g_isHandActive = true;
         g_currentStreet = 1;
@@ -1071,25 +1261,78 @@ DecisionResult decision = {};
 
 decision = SafeGetDecision();
 
+    if (decision.actionType < ACT_FOLD ||
+        (decision.actionType > ACT_ALLIN && decision.actionType != ACT_NOACTION))
+    {
+        WriteLog("[user.cpp] AVISO: G5Bridge retornou actionType invalido (%d). Nao executando acao neste heartbeat.\n",
+            decision.actionType);
+        g_cachedDecision = NoActionOpenPPLReturnValue();
+        g_cachedActionType = ACT_NOACTION;
+        g_cachedByAmount = 0;
+        g_heroActedThisStreet = false;
+        g_heroRegistered = false;
+        return g_cachedDecision;
+    }
+
+    if (decision.actionType == ACT_NOACTION)
+    {
+        WriteLog("[user.cpp] G5Bridge retornou NoAction. Nao executando Fold/Check/Call por fallback.\n");
+        g_cachedDecision = NoActionOpenPPLReturnValue();
+        g_cachedActionType = ACT_NOACTION;
+        g_cachedByAmount = 0;
+        g_heroActedThisStreet = false;
+        g_heroRegistered = false;
+        return g_cachedDecision;
+    }
+
     std::string finalAction;
     double returnValue = 0.0;
+    bool isCustomRaise = false;
+    bool isBetButton = false;
+    std::string betButtonName;
+
+    int bb = ReadCents("bblind");
+
     switch (decision.actionType) {
-    case ACT_FOLD:  finalAction = "Fold";   returnValue = 0.0; break;
-    case ACT_CHECK: finalAction = "Check";  returnValue = 1.0; break;
-    case ACT_CALL:  finalAction = "Call";   returnValue = 2.0; break;
-    case ACT_BET:   finalAction = "Raise";  returnValue = 3.0; break;
-    case ACT_RAISE: finalAction = "Raise";  returnValue = 4.0; break;
-    case ACT_ALLIN: {
+    case ACT_FOLD:
+        finalAction = "Fold";
+        returnValue = GetOHActionSymbolSafe("Fold", 0.0);
+        break;
+
+    case ACT_CHECK:
+        finalAction = "Check";
+        returnValue = GetOHActionSymbolSafe("Check", 0.0);
+        break;
+
+    case ACT_CALL:
+        finalAction = "Call";
+        returnValue = GetOHActionSymbolSafe("Call", 2.0);
+        break;
+
+    case ACT_BET:
+    case ACT_RAISE:
+    {
+        double buttonReturn = 0.0;
+        if (TrySelectBetButtonForRaise(decision, ohStreet, bb, betButtonName, buttonReturn))
+        {
+            finalAction = betButtonName;
+            returnValue = buttonReturn;
+            isBetButton = true;
+        }
+        else
+        {
+            finalAction = "CustomBetsizeBB";
+            returnValue = CustomBetsizeReturnInBigBlinds(decision.byAmount, bb);
+            isCustomRaise = true;
+        }
+        break;
+    }
+
+    case ACT_ALLIN:
+    {
         int heroBalNow = ReadChairBalance(g_heroChair);
         int heroBetNow = ReadChairCurrentBet(g_heroChair);
-
         int intended = decision.byAmount;
-
-        // Dependendo da origem da decisÃ£o, byAmount pode representar:
-        // 1) valor a colocar agora; ou
-        // 2) alvo total apÃ³s a aÃ§Ã£o.
-        //
-        // Para validar o all-in, aceitamos proximidade com qualquer uma das duas leituras.
         int realAllInDelta = heroBalNow;
         int realAllInTotal = heroBalNow + heroBetNow;
 
@@ -1098,8 +1341,8 @@ decision = SafeGetDecision();
             IsAtLeastConfiguredPercentOf(intended, realAllInTotal);
 
         if (validAllIn) {
-            finalAction = "BetMax";
-            returnValue = 5.0;
+            finalAction = "RaiseMax";
+            returnValue = GetOHActionSymbolSafe("RaiseMax", 5.0);
 
             WriteLog("[user.cpp] ALLIN VALIDADO %d%%: intended=%d ($%.2f), balance c%d=%d ($%.2f), currentbet c%d=%d ($%.2f), total=%d ($%.2f).\n",
                 g_runtimeAllInCommitmentPercent,
@@ -1109,29 +1352,58 @@ decision = SafeGetDecision();
                 realAllInTotal, realAllInTotal / 100.0);
         }
         else {
-            // O G5 achou que era all-in no estado interno dele,
-            // mas isso nÃ£o bate com o stack real do OH.
-            // EntÃ£o executamos como raise/bet normal do valor pretendido.
-            finalAction = "Raise";
-            returnValue = 4.0;
+            double buttonReturn = 0.0;
+            DecisionResult converted = decision;
+            converted.actionType = ACT_RAISE;
 
-            WriteLog("[user.cpp] ALLIN BLOQUEADO %d%%: intended=%d ($%.2f), balance c%d=%d ($%.2f), currentbet c%d=%d ($%.2f), total=%d ($%.2f). Convertendo para Raise.\n",
+            if (TrySelectBetButtonForRaise(converted, ohStreet, bb, betButtonName, buttonReturn))
+            {
+                finalAction = betButtonName;
+                returnValue = buttonReturn;
+                isBetButton = true;
+            }
+            else
+            {
+                finalAction = "CustomBetsizeBB";
+                returnValue = CustomBetsizeReturnInBigBlinds(decision.byAmount, bb);
+                isCustomRaise = true;
+            }
+
+            WriteLog("[user.cpp] ALLIN BLOQUEADO %d%%: intended=%d ($%.2f), balance c%d=%d ($%.2f), currentbet c%d=%d ($%.2f), total=%d ($%.2f). Convertendo para %s.\n",
                 g_runtimeAllInCommitmentPercent,
                 intended, intended / 100.0,
                 g_heroChair, heroBalNow, heroBalNow / 100.0,
                 g_heroChair, heroBetNow, heroBetNow / 100.0,
-                realAllInTotal, realAllInTotal / 100.0);
+                realAllInTotal, realAllInTotal / 100.0,
+                finalAction.c_str());
         }
 
         break;
     }
-    default:        finalAction = "Fold";   returnValue = 0.0; break;
+
+    default:
+        WriteLog("[user.cpp] AVISO: actionType inesperado apos validacao (%d). NoAction.\n", decision.actionType);
+        g_cachedDecision = NoActionOpenPPLReturnValue();
+        g_cachedActionType = ACT_NOACTION;
+        g_cachedByAmount = 0;
+        g_heroActedThisStreet = false;
+        g_heroRegistered = false;
+        return g_cachedDecision;
+    }
+
+    if (isCustomRaise && returnValue <= 0.0)
+    {
+        WriteLog("[user.cpp] ERRO: custom raise sem size valido. byAmount=%d bb=%d. Retornando NoAction.\n",
+            decision.byAmount, bb);
+        g_cachedDecision = NoActionOpenPPLReturnValue();
+        g_cachedActionType = ACT_NOACTION;
+        g_cachedByAmount = 0;
+        g_heroActedThisStreet = false;
+        g_heroRegistered = false;
+        return g_cachedDecision;
     }
 
     double actualReturnValue = returnValue;
-
-    if (finalAction != "Raise")
-        actualReturnValue = GetOHActionSymbolSafe(finalAction.c_str(), returnValue);
 
     g_cachedDecision = actualReturnValue;
     g_cachedActionType = decision.actionType;
@@ -1147,39 +1419,26 @@ decision = SafeGetDecision();
         ? "EV"
         : "ChartScore";
 
-    WriteLog("[user.cpp] user.dll decidiu: %s (amount=$%.2f | %s cc=%.2f br=%.2f | origem=%s) -> %.0f\n",
+    WriteLog("[user.cpp] user.dll decidiu: %s (amount=$%.2f | %s cc=%.2f br=%.2f | origem=%s) -> %.3f\n",
         ActionName(decision.actionType), decision.byAmount / 100.0,
         metricLabel,
         decision.checkCallEV, decision.betRaiseEV,
         decisionOrigin,
         actualReturnValue);
 
-    if (finalAction == "Raise") {
-        int bb = ReadCents("bblind");
-
-        if (bb <= 0) {
-            WriteLog("[user.cpp] ERRO: bblind invalido (%d). Bloqueando Raise e retornando Call.\n", bb);
-            g_cachedDecision = GetOHActionSymbolSafe("Call", 2.0);
-            return g_cachedDecision;
-        }
-
+    if (isBetButton)
+    {
+        WriteLog("[user.cpp] Execucao por bet button: %s | alvoG5=$%.2f | retornoOpenPPL=%.3f.\n",
+            betButtonName.c_str(), decision.byAmount / 100.0, actualReturnValue);
+    }
+    else if (isCustomRaise)
+    {
         int heroMoneyInPot = g_lastPlayerBets[g_heroChair];
-        int raiseToTotal = decision.byAmount;
-
-        if (raiseToTotal <= 0) {
-            WriteLog("[user.cpp] ERRO: raiseToTotal invalido (%d). Bloqueando Raise e retornando Call.\n", raiseToTotal);
-            g_cachedDecision = GetOHActionSymbolSafe("Call", 2.0);
-            return g_cachedDecision;
-        }
-
-        actualReturnValue = (double)raiseToTotal / (double)bb;
-
-        WriteLog("[user.cpp] Raise: byAmount=$%.2f + heroInPot=$%.2f = RaiseTo=$%.2f (%.2f BBs)\n",
+        WriteLog("[user.cpp] Execucao por caixa: byAmount=$%.2f + heroInPot=$%.2f = RaiseTo=$%.2f (%.2f BBs) | retornoOpenPPL=%.3f | dll$betsize=$%.2f\n",
             decision.byAmount / 100.0, heroMoneyInPot / 100.0,
-            raiseToTotal / 100.0, actualReturnValue);
-
-        g_cachedDecision = actualReturnValue;
-        return actualReturnValue;
+            decision.byAmount / 100.0, actualReturnValue,
+            actualReturnValue,
+            g_cachedByAmount / 100.0);
     }
 
     return actualReturnValue;
