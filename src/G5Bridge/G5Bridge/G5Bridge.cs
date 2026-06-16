@@ -1010,7 +1010,7 @@ public static void Log(string message)
         if (!Directory.Exists(logDir)) Directory.CreateDirectory(logDir);
 
         string tablePart = string.IsNullOrWhiteSpace(_targetTableId)
-            ? "sem_tabela"
+            ? "warmup"
             : Regex.Replace(_targetTableId, @"[^\w\-]+", "_");
 
         string logFile = $"G5Bridge_{tablePart}_pid{Process.GetCurrentProcess().Id}.log";

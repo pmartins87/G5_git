@@ -49,7 +49,7 @@
 static const char* DM_LOG_PATH = "C:\\G5Pressure\\DecisionMaking_debug.log";
 static const char* DM_DIAGNOSTIC_FLAG_PATH = "C:\\G5Pressure\\DecisionMaking.diagnostic";
 static const DWORD DM_FATAL_EXCEPTION_CODE = 0xE0000001;
-static const char* DM_BUILD_ID = "phase8_1_syncfix_mc2000_tc1000_cutoff0005";
+static const char* DM_BUILD_ID = "phase23_safe_symbols_adaptive_depth";
 
 static bool DMIsDiagnosticEnabled()
 {
@@ -274,12 +274,23 @@ namespace G5Cpp
 
         const float NODE_CHANCE_CUTOFF = 0.0005f;
 
+        static volatile LONG g_DMMonteCarloSeedCounter = 0;
+
         // Phase 6A: optional root-only forced bet/raise amount.
         // Used only by EstimateEVForBetRaiseAmount to evaluate candidate sizings.
         // The flag is consumed at the root hero node before evaluating the check/call branch,
         // so recursive future hero decisions keep their normal default sizing.
         static bool g_DMForceRootBetRaiseAmount = false;
         static int g_DMForcedRootBetRaiseAmount = 0;
+
+        // Profundidade adaptativa de raiz pós-flop.
+        // Unidades: milissegundos * 1000 para permitir Interlocked em LONG.
+        static volatile LONG g_DMFlopQuickRootAvgMsX1000 = 0;
+        static volatile LONG g_DMDeepRootAvgMsX1000 = 0;
+        static const float DM_DEEPEN_MARGIN_BB = 1.50f;
+        static const double DM_DEEPEN_MAX_QUICK_MS = 650.0;
+        static const double DM_DEEPEN_MAX_AVG_MS = 450.0;
+        static const int DM_DEEPEN_MAX_START_ACTIVE = 3;
 
         const char* DMStreetName(Street street)
         {
@@ -506,6 +517,48 @@ namespace G5Cpp
         {
             unsigned int v = static_cast<unsigned int>(rng.next());
             return ((v % 1000000u) + 0.5f) / 1000000.0f;
+        }
+
+        int DMCreateMonteCarloSeed(const GameState& prms, const char* salt)
+        {
+            LARGE_INTEGER counter;
+            QueryPerformanceCounter(&counter);
+
+            unsigned int seed = (unsigned int)(counter.QuadPart & 0xFFFFFFFFu);
+            seed ^= (unsigned int)((counter.QuadPart >> 32) & 0xFFFFFFFFu);
+            seed ^= (unsigned int)((ULONG_PTR)&prms);
+            seed ^= (unsigned int)(GetCurrentThreadId() * 2246822519u);
+            seed ^= (unsigned int)(InterlockedIncrement(&g_DMMonteCarloSeedCounter) * 2654435761u);
+
+            int hero0 = prms.heroHoleCards.Card0.toInt();
+            int hero1 = prms.heroHoleCards.Card1.toInt();
+
+            seed ^= (unsigned int)((hero0 + 1) * 73856093u);
+            seed ^= (unsigned int)((hero1 + 1) * 19349663u);
+            seed ^= (unsigned int)((prms.street + 1) * 83492791u);
+            seed ^= (unsigned int)((prms.numBets + 1) * 2654435761u);
+            seed ^= (unsigned int)((prms.numCallers + 1) * 2246822519u);
+            seed ^= (unsigned int)((prms.startNumActive + 1) * 3266489917u);
+            seed ^= (unsigned int)((prms.playerToActInd + 1) * 668265263u);
+
+            for (int i = 0; i < prms.board.size; i++)
+            {
+                int card = prms.board.card[i].toInt();
+                seed ^= (unsigned int)((card + 1) * (374761393u + (unsigned int)(i * 668265263u)));
+            }
+
+            if (salt != nullptr)
+            {
+                for (const char* p = salt; *p != '\0'; ++p)
+                    seed = (seed * 33u) ^ (unsigned char)(*p);
+            }
+
+            seed &= 0x7FFFFFFFu;
+
+            if (seed == 0u)
+                seed = 1u;
+
+            return (int)seed;
         }
 
         int DMSampleHandIndex(const DMRangeSampler& sampler, ParkMillerCarta& rng)
@@ -1093,7 +1146,7 @@ namespace G5Cpp
                 }
 
                 Pot pot(prms._players);
-                ParkMillerCarta rng(1);
+                ParkMillerCarta rng(DMCreateMonteCarloSeed(prms, "showdown multiway"));
 
                 float totalWinnings = 0.0f;
                 int nIter = 0;
@@ -1313,7 +1366,7 @@ namespace G5Cpp
                 }
 
                 Pot pot(prms._players);
-                ParkMillerCarta rng(1);
+                ParkMillerCarta rng(DMCreateMonteCarloSeed(prms, "turn cutoff multiway"));
 
                 float totalWinnings = 0.0f;
                 int nRiversChecked = 0;
@@ -1521,6 +1574,96 @@ namespace G5Cpp
             return EV;
         }
 
+        static double DMNowMs()
+        {
+            LARGE_INTEGER freq;
+            LARGE_INTEGER counter;
+            QueryPerformanceFrequency(&freq);
+            QueryPerformanceCounter(&counter);
+            return (double)counter.QuadPart * 1000.0 / (double)freq.QuadPart;
+        }
+
+        static double DMUpdateMovingAverageMs(volatile LONG* avgSlot, double sampleMs)
+        {
+            if (!avgSlot || !(sampleMs >= 0.0) || !std::isfinite(sampleMs))
+                return 0.0;
+
+            LONG sample = (LONG)(sampleMs * 1000.0 + 0.5);
+            if (sample < 0) sample = 0;
+
+            for (;;)
+            {
+                LONG oldValue = *avgSlot;
+                LONG newValue = (oldValue <= 0) ? sample : (LONG)(((long long)oldValue * 7LL + (long long)sample) / 8LL);
+                LONG observed = InterlockedCompareExchange(avgSlot, newValue, oldValue);
+                if (observed == oldValue)
+                    return (double)newValue / 1000.0;
+            }
+        }
+
+        static double DMGetMovingAverageMs(volatile LONG* avgSlot)
+        {
+            if (!avgSlot) return 0.0;
+            LONG v = *avgSlot;
+            if (v <= 0) return 0.0;
+            return (double)v / 1000.0;
+        }
+
+        static void DMEvaluateRootHeroPlays(float& checkCallEV, float& betRaiseEV, DMStats& stats, const GameState& prms, int forcedRootBetRaiseAmount)
+        {
+            if (forcedRootBetRaiseAmount > 0)
+            {
+                g_DMForcedRootBetRaiseAmount = forcedRootBetRaiseAmount;
+                g_DMForceRootBetRaiseAmount = true;
+            }
+
+            try
+            {
+                estimateEV_HeroPlays(checkCallEV, betRaiseEV, stats, prms);
+            }
+            catch (...)
+            {
+                g_DMForcedRootBetRaiseAmount = 0;
+                g_DMForceRootBetRaiseAmount = false;
+                throw;
+            }
+
+            g_DMForcedRootBetRaiseAmount = 0;
+            g_DMForceRootBetRaiseAmount = false;
+        }
+
+        static bool DMShouldAttemptDeepRoot(const GameState& prms, const DMStats& quickStats, float checkCallEV, float betRaiseEV, double quickElapsedMs, float& marginBB)
+        {
+            marginBB = 999999.0f;
+
+            if (prms.street != Street_Flop)
+                return false;
+
+            if (quickStats.numTurnCutOffs <= 0)
+                return false;
+
+            if (prms.startNumActive > DM_DEEPEN_MAX_START_ACTIVE)
+                return false;
+
+            if (prms.bigBlindSize <= 0)
+                return false;
+
+            float margin = std::fabs(checkCallEV - betRaiseEV);
+            marginBB = margin / (float)prms.bigBlindSize;
+
+            if (marginBB > DM_DEEPEN_MARGIN_BB)
+                return false;
+
+            double avgMs = DMGetMovingAverageMs(&g_DMFlopQuickRootAvgMsX1000);
+            if (avgMs > 0.0 && avgMs > DM_DEEPEN_MAX_AVG_MS)
+                return false;
+
+            if (quickElapsedMs > DM_DEEPEN_MAX_QUICK_MS)
+                return false;
+
+            return true;
+        }
+
         void DMLogCalculationSummary(const GameState& prms, const DMStats& stats, float checkCallEV, float betRaiseEV)
         {
             if (!DMIsDiagnosticEnabled())
@@ -1541,6 +1684,56 @@ namespace G5Cpp
                 (stats.numTurnCutOffs > 0) ? (stats.turnCutOff_NumRiversChecked / stats.numTurnCutOffs) : 0.0f,
                 (stats.numTurnCutOffs > 0) ? (stats.turnCutOff_NumPots / stats.numTurnCutOffs) : 0.0f
             );
+        }
+
+
+        static bool DMShouldUseTurnCutoffAtStreetTransition(const GameState& prms, int& complexityScore)
+        {
+            // Phase22 revisão: não transformar todo root-turn em cutoff.
+            //
+            // 1) Se a avaliação começou no flop e chegou ao turn, mantemos cutoff.
+            //    Esse é o caso que derrubava/travava a phase19: a árvore de flop
+            //    já expandiu até o turn e, se deixarmos abrir river + ações futuras,
+            //    a ramificação cresce demais.
+            //
+            // 2) Se a avaliação começou diretamente no turn, usamos full tree salvo
+            //    quando uma estimativa estrutural simples indicar spot pesado.
+            //    A estimativa é deliberadamente conservadora e usa apenas dados nativos
+            //    do GameState, sem equity do OpenHoldem e sem heurística de força de mão.
+            int activePlayers = prms.numActivePlayers();
+            int activeNonAllInEstimate = prms.startNumActive;
+            if (activeNonAllInEstimate < activePlayers)
+                activeNonAllInEstimate = activePlayers;
+
+            // numActiveNonAllInPlayers() é método privado de GameState; fora da classe
+            // usamos startNumActive como estimativa conservadora compilável.
+            // Ao entrar no river, numBets será resetado. Portanto o maior fator de
+            // custo futuro é: quantos jogadores ainda podem apostar e quantas apostas
+            // por street serão permitidas no river.
+            int riverBetSlots = prms.BETS_CUTOFF_POST_FLOP;
+            if (riverBetSlots < 0)
+                riverBetSlots = 0;
+
+            complexityScore = activeNonAllInEstimate * (riverBetSlots + 1);
+
+            if (activePlayers >= 4)
+                complexityScore += 3;
+
+            if (prms.startNumActive >= 4)
+                complexityScore += 4;
+
+            if (prms.startedOnFlop)
+                complexityScore += 6;
+
+            // Caso de estabilidade: avaliação iniciada no flop continua usando cutoff,
+            // inclusive HU. Isso protege os spots de flop que já provaram travar quando
+            // a árvore era deixada ir completa até river.
+            if (prms.startedOnFlop)
+                return true;
+
+            // Root turn HU ou 3-way simples normalmente é aceitável e preserva maior
+            // fidelidade estratégica. Multiway 4+ ou score alto vira cutoff nativo.
+            return complexityScore >= 12;
         }
 
         /// <summary>
@@ -1565,17 +1758,32 @@ namespace G5Cpp
                 }
                 else // Go to next street
                 {
-                    // Phase20: se a avaliacao raiz comecou no flop, o inicio do turn vira
-                    // folha terminal aproximada pela propria DecisionMaking.dll.
-                    //
-                    // Motivo: a arvore HU flop->turn->river sem cutoff explode em numero de
-                    // nos, trava o OH e pode derrubar o processo hospede. O cutoff nao e
-                    // heuristica externa e nao usa OpenHoldem: estimateEV_TurnCutoff enumera
-                    // rivers contra os ranges internos atualizados do G5 e calcula equity/EV
-                    // pelo avaliador original.
-                    if (prms.street == Street_Turn && prms.startedOnFlop)
+                    // Phase22 revisão: turn só vira cutoff nativo quando a própria
+                    // estrutura da árvore indicar risco de explosão combinatória.
+                    // Avaliações iniciadas no flop continuam cortando ao chegar no turn;
+                    // avaliações iniciadas diretamente no turn usam full tree em spots
+                    // simples, preservando melhor qualidade estratégica.
+                    if (prms.street == Street_Turn)
                     {
-                        return estimateEV_TurnCutoff(stats, prms);
+                        int turnComplexityScore = 0;
+                        if (DMShouldUseTurnCutoffAtStreetTransition(prms, turnComplexityScore))
+                        {
+                            DMLogF("[DM][TURN CUTOFF POLICY] usar cutoff nativo | startedOnFlop=%d active=%d nonAllInEstimate=%d startActive=%d score=%d",
+                                prms.startedOnFlop ? 1 : 0,
+                                prms.numActivePlayers(),
+                                prms.startNumActive,
+                                prms.startNumActive,
+                                turnComplexityScore);
+                            return estimateEV_TurnCutoff(stats, prms);
+                        }
+
+                        DMLogF("[DM][TURN CUTOFF POLICY] manter full tree no river | startedOnFlop=%d active=%d nonAllInEstimate=%d startActive=%d score=%d",
+                            prms.startedOnFlop ? 1 : 0,
+                            prms.numActivePlayers(),
+                            prms.startNumActive,
+                            prms.startNumActive,
+                            turnComplexityScore);
+                        return estimateEV_NextStreet_mt(stats, prms);
                     }
                     else
                     {
@@ -1600,7 +1808,7 @@ namespace G5Cpp
         }
     } // namespace
 
-    extern "C" G5_EXPORT void __stdcall EstimateEV(float& checkCallEV, float& betRaiseEV, int buttonInd, int heroIndex, const HoleCards& heroHoleCards,
+    static void EstimateEV_NoSEH(float& checkCallEV, float& betRaiseEV, int buttonInd, int heroIndex, const HoleCards& heroHoleCards,
         const PlayerDTO* players, int nPlayers, const Card* cardsInBoard, Street street, int numBets, int numCallers, int bigBlindSize, const void* gc)
     {
 DMLog("===== ENTER EstimateEV =====");
@@ -1723,13 +1931,13 @@ DMResetDiagnosticCounters();
             switch (street)
             {
             case Street_River:
-                DMLog("Street_River: configurando BETS_CUTOFF_POST_FLOP=3");
-                prms.BETS_CUTOFF_POST_FLOP = 3;
+                DMLog("Street_River: configurando BETS_CUTOFF_POST_FLOP=2");
+                prms.BETS_CUTOFF_POST_FLOP = 2;
                 break;
 
             case Street_Turn:
-                DMLog("Street_Turn: configurando BETS_CUTOFF_POST_FLOP");
-                prms.BETS_CUTOFF_POST_FLOP = (prms.startNumActive >= 4) ? 2 : 3;
+                DMLog("Street_Turn: configurando BETS_CUTOFF_POST_FLOP=2");
+                prms.BETS_CUTOFF_POST_FLOP = 2;
                 break;
 
             case Street_Flop:
@@ -1751,12 +1959,64 @@ DMResetDiagnosticCounters();
             if (street > Street_PreFlop)
                 DMLogRootContext("ANTES", prms);
 
-            DMLog("Antes de estimateEV_HeroPlays");
-            estimateEV_HeroPlays(checkCallEV, betRaiseEV, stats, prms);
-            DMLog("Depois de estimateEV_HeroPlays");
+            int rootForcedBetRaiseAmount = (g_DMForceRootBetRaiseAmount && g_DMForcedRootBetRaiseAmount > 0)
+                ? g_DMForcedRootBetRaiseAmount
+                : 0;
+
+            DMLog("Antes de estimateEV_HeroPlays rapido");
+            double quickStartMs = DMNowMs();
+            DMEvaluateRootHeroPlays(checkCallEV, betRaiseEV, stats, prms, rootForcedBetRaiseAmount);
+            double quickElapsedMs = DMNowMs() - quickStartMs;
+            DMLog("Depois de estimateEV_HeroPlays rapido");
+
+            if (street == Street_Flop)
+                DMUpdateMovingAverageMs(&g_DMFlopQuickRootAvgMsX1000, quickElapsedMs);
 
             if (street > Street_PreFlop)
                 DMLogCalculationSummary(prms, stats, checkCallEV, betRaiseEV);
+
+            if (street == Street_Flop)
+            {
+                float quickMarginBB = 0.0f;
+                if (DMShouldAttemptDeepRoot(prms, stats, checkCallEV, betRaiseEV, quickElapsedMs, quickMarginBB))
+                {
+                    DMLogF("[DM][ADAPTIVE DEPTH] margem pequena %.3fbb e quick=%.2fms; tentando raiz profunda", quickMarginBB, quickElapsedMs);
+
+                    GameState deepPrms = prms;
+                    deepPrms.BETS_CUTOFF_POST_FLOP = 3;
+                    deepPrms.startedOnFlop = false;
+
+                    DMStats deepStats;
+                    float deepCheckCallEV = -999999.0f;
+                    float deepBetRaiseEV = -999999.0f;
+                    double deepStartMs = DMNowMs();
+                    DMEvaluateRootHeroPlays(deepCheckCallEV, deepBetRaiseEV, deepStats, deepPrms, rootForcedBetRaiseAmount);
+                    double deepElapsedMs = DMNowMs() - deepStartMs;
+                    DMUpdateMovingAverageMs(&g_DMDeepRootAvgMsX1000, deepElapsedMs);
+
+                    if (std::isfinite(deepCheckCallEV) && std::isfinite(deepBetRaiseEV) &&
+                        deepCheckCallEV > -900000.0f && deepBetRaiseEV > -900000.0f)
+                    {
+                        checkCallEV = deepCheckCallEV;
+                        betRaiseEV = deepBetRaiseEV;
+                        stats = deepStats;
+                        DMLogF("[DM][ADAPTIVE DEPTH] resultado profundo aceito: cc=%.6f br=%.6f deep=%.2fms quick=%.2fms", checkCallEV, betRaiseEV, deepElapsedMs, quickElapsedMs);
+                    }
+                    else
+                    {
+                        DMLogF("[DM][ADAPTIVE DEPTH] resultado profundo rejeitado: cc=%.6f br=%.6f deep=%.2fms; mantendo resultado rapido", deepCheckCallEV, deepBetRaiseEV, deepElapsedMs);
+                    }
+                }
+                else
+                {
+                    DMLogF("[DM][ADAPTIVE DEPTH] nao aprofundou: quick=%.2fms avgQuick=%.2fms turnCutoffs=%d startActive=%d margem=%.3fbb",
+                        quickElapsedMs,
+                        DMGetMovingAverageMs(&g_DMFlopQuickRootAvgMsX1000),
+                        stats.numTurnCutOffs,
+                        prms.startNumActive,
+                        quickMarginBB);
+                }
+            }
 
             {
                 char buf[256];
@@ -1820,6 +2080,49 @@ DMResetDiagnosticCounters();
             betRaiseEV = -999999.0f;
             return;
         }
+    }
+
+    extern "C" G5_EXPORT void __stdcall EstimateEV(float& checkCallEV, float& betRaiseEV, int buttonInd, int heroIndex, const HoleCards& heroHoleCards,
+        const PlayerDTO* players, int nPlayers, const Card* cardsInBoard, Street street, int numBets, int numCallers, int bigBlindSize, const void* gc)
+    {
+        checkCallEV = -999999.0f;
+        betRaiseEV = -999999.0f;
+
+#if defined(_MSC_VER)
+        __try
+        {
+            EstimateEV_NoSEH(checkCallEV, betRaiseEV, buttonInd, heroIndex, heroHoleCards,
+                players, nPlayers, cardsInBoard, street, numBets, numCallers, bigBlindSize, gc);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            DWORD code = GetExceptionCode();
+            char buf[256];
+            sprintf_s(buf, sizeof(buf), "FATAL: SEH capturada dentro de EstimateEV. code=0x%08X", code);
+            DMLogAlways(buf);
+
+            DMLogFmtAlways(
+                "EstimateEV parametros no momento da falha SEH",
+                gc,
+                players,
+                cardsInBoard,
+                buttonInd,
+                heroIndex,
+                nPlayers,
+                static_cast<int>(street),
+                numBets,
+                numCallers,
+                bigBlindSize
+            );
+
+            checkCallEV = -999999.0f;
+            betRaiseEV = -999999.0f;
+            return;
+        }
+#else
+        EstimateEV_NoSEH(checkCallEV, betRaiseEV, buttonInd, heroIndex, heroHoleCards,
+            players, nPlayers, cardsInBoard, street, numBets, numCallers, bigBlindSize, gc);
+#endif
     }
 
     extern "C" G5_EXPORT void __stdcall EstimateEVForBetRaiseAmount(float& checkCallEV, float& betRaiseEV, int forcedBetRaiseAmount, int buttonInd, int heroIndex, const HoleCards& heroHoleCards,

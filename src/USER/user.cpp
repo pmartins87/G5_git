@@ -51,21 +51,211 @@ static const char* ActionName(int a);
 DLL_IMPLEMENTS double __stdcall ProcessQuery(const char* pquery);
 extern "C" __declspec(dllexport) double process_query(const char* pquery);
 
-static double GetOHActionSymbolSafe(const char* actionName, double fallback)
+// =============================================================================
+// SÍMBOLOS OPENHOLDEM / OPENPPL — CAMADA ESTRITA
+// =============================================================================
+// OpenHoldem expõe GetSymbol(const char*), mas a API não oferece, para a user.dll,
+// uma função pública "SymbolExists". A blindagem robusta aqui é dupla:
+//   1) nunca chamar GetSymbol para nomes fora de uma allowlist/padrão auditado;
+//   2) não resolver constantes de ação OpenPPL por GetSymbol; usamos os valores
+//      oficiais da OpenPPL Library para evitar fallback silencioso.
+//
+// Fontes auditadas:
+//   - OpenHoldem Manual: símbolos $$pc/$$pr/$$ps, $$cc/$$cr/$$cs, betround,
+//     bblind, pot, call, userchair, dealerchair etc.
+//   - Código OH: foldbits1..4, callbits1..4, raisbits1..4.
+//   - OpenPPL Library: Calls, Raises e constantes de ação.
+// =============================================================================
+static const double OPPL_CHECK = 0.0;
+static const double OPPL_BEEP = -1000000.0;
+static const double OPPL_FOLD = -1000001.0;
+static const double OPPL_RAISE_THIRD_POT = -1000004.0;
+static const double OPPL_RAISE_HALF_POT = -1000005.0;
+static const double OPPL_RAISE_TWO_THIRD_POT = -1000006.0;
+static const double OPPL_RAISE_MAX = -1000009.0;
+static const double OPPL_CALL = -1000010.0;
+
+static bool IsDigitChar(char c)
 {
-    if (!actionName || !actionName[0])
-        return fallback;
+    return c >= '0' && c <= '9';
+}
+
+static bool IsExactSymbol(const char* s, const char* expected)
+{
+    return s && expected && strcmp(s, expected) == 0;
+}
+
+static bool IsChairIndexedSymbol(const char* s, const char* prefix)
+{
+    if (!s || !prefix) return false;
+    size_t n = strlen(prefix);
+    return strncmp(s, prefix, n) == 0 && IsDigitChar(s[n]) && s[n + 1] == '\0';
+}
+
+static bool IsBetroundIndexedBitsSymbol(const char* s, const char* prefix)
+{
+    if (!s || !prefix) return false;
+    size_t n = strlen(prefix);
+    if (strncmp(s, prefix, n) != 0) return false;
+    return s[n] >= '1' && s[n] <= '4' && s[n + 1] == '\0';
+}
+
+static bool IsAuditedCardSymbol(const char* s)
+{
+    // OH card symbols: $$AB#, where A=p/c, B=c/r/s, # player/common index.
+    // We only use player p0..p1 and common c0..c4, but allow p0..p3 because
+    // the official OH notation also covers Omaha.
+    if (!s || strlen(s) != 5) return false;
+    if (s[0] != '$' || s[1] != '$') return false;
+    if (s[2] != 'p' && s[2] != 'c') return false;
+    if (s[3] != 'c' && s[3] != 'r' && s[3] != 's') return false;
+    if (!IsDigitChar(s[4])) return false;
+
+    int idx = s[4] - '0';
+    if (s[2] == 'p') return idx >= 0 && idx <= 3;
+    return idx >= 0 && idx <= 4;
+}
+
+static bool IsAuditedNativeOHSymbol(const char* s)
+{
+    if (!s || !s[0]) return false;
+
+    if (IsAuditedCardSymbol(s)) return true;
+
+    if (IsExactSymbol(s, "userchair")) return true;
+    if (IsExactSymbol(s, "dealerchair")) return true;
+    if (IsExactSymbol(s, "betround")) return true;
+    if (IsExactSymbol(s, "bblind")) return true;
+    if (IsExactSymbol(s, "pot")) return true;
+    if (IsExactSymbol(s, "call")) return true;
+    if (IsExactSymbol(s, "playersdealtbits")) return true;
+    if (IsExactSymbol(s, "playersplayingbits")) return true;
+
+    if (IsChairIndexedSymbol(s, "balance")) return true;
+    if (IsChairIndexedSymbol(s, "currentbet")) return true;
+
+    if (IsBetroundIndexedBitsSymbol(s, "foldbits")) return true;
+    if (IsBetroundIndexedBitsSymbol(s, "callbits")) return true;
+    if (IsBetroundIndexedBitsSymbol(s, "raisbits")) return true;
+
+    return false;
+}
+
+static bool IsAuditedOpenPPLSymbol(const char* s)
+{
+    if (IsExactSymbol(s, "Calls")) return true;
+    if (IsExactSymbol(s, "Raises")) return true;
+    return false;
+}
+
+static bool IsAuditedProjectG5Symbol(const char* s)
+{
+    // Estes símbolos não são nativos do OH; são UDFs do nosso G5cash.txt.
+    // A leitura deles só é aceita depois de validar f$G5_ConfigSchemaVersion.
+    if (IsExactSymbol(s, "f$G5_ConfigSchemaVersion")) return true;
+    if (IsExactSymbol(s, "f$G5_LogCompleto")) return true;
+    if (IsExactSymbol(s, "f$G5_LogRangesCompletos")) return true;
+    if (IsExactSymbol(s, "f$G5_AllInPorCommitment")) return true;
+    if (IsExactSymbol(s, "f$G5_AllInCommitmentPercent")) return true;
+    return false;
+}
+
+static bool IsAuditedOHSymbolName(const char* symbol)
+{
+    return IsAuditedNativeOHSymbol(symbol)
+        || IsAuditedOpenPPLSymbol(symbol)
+        || IsAuditedProjectG5Symbol(symbol);
+}
+
+static bool ReadOHSymbolStrict(const char* symbol, double* outValue, bool required)
+{
+    if (outValue) *outValue = 0.0;
+
+    if (!symbol || !symbol[0])
+    {
+        WriteLog("[user.cpp][CRITICO] GetSymbol bloqueado: nome vazio/null.\n");
+        return false;
+    }
+
+    if (!IsAuditedOHSymbolName(symbol))
+    {
+        WriteLog("[user.cpp][CRITICO] GetSymbol bloqueado: simbolo nao auditado/inexistente para este projeto: '%s'.\n", symbol);
+        return false;
+    }
 
     __try
     {
-        return GetSymbol(actionName);
+        double v = GetSymbol(symbol);
+        if (v != v)
+        {
+            WriteLog("[user.cpp][CRITICO] GetSymbol('%s') retornou NaN.\n", symbol);
+            return false;
+        }
+
+        if (outValue) *outValue = v;
+        return true;
     }
     __except (1)
     {
-        WriteLog("[user.cpp] ERRO: excecao ao resolver simbolo de acao OH '%s'. Usando fallback %.0f.\n",
-            actionName, fallback);
+        WriteLog("[user.cpp][CRITICO] excecao ao chamar GetSymbol('%s').\n", symbol);
+        return false;
+    }
+}
+
+static double ReadOHSymbolOr(const char* symbol, double fallback, bool required)
+{
+    double v = fallback;
+    if (!ReadOHSymbolStrict(symbol, &v, required))
+    {
+        if (required)
+            WriteLog("[user.cpp][CRITICO] simbolo obrigatorio '%s' indisponivel. fallback=%.3f.\n", symbol ? symbol : "<null>", fallback);
         return fallback;
     }
+    return v;
+}
+
+static int ReadIntOHSymbolOr(const char* symbol, int fallback, bool required)
+{
+    double v = ReadOHSymbolOr(symbol, (double)fallback, required);
+    return (int)(v + (v >= 0.0 ? 0.5 : -0.5));
+}
+
+static bool ReadRequiredIntOHSymbol(const char* symbol, int* outValue, int minValue, int maxValue)
+{
+    double v = 0.0;
+    if (!ReadOHSymbolStrict(symbol, &v, true))
+        return false;
+
+    int iv = (int)(v + (v >= 0.0 ? 0.5 : -0.5));
+    if (iv < minValue || iv > maxValue)
+    {
+        WriteLog("[user.cpp][CRITICO] simbolo obrigatorio '%s' fora da faixa: %.3f esperado=[%d,%d].\n",
+            symbol, v, minValue, maxValue);
+        return false;
+    }
+
+    if (outValue) *outValue = iv;
+    return true;
+}
+
+static double GetOHActionSymbolSafe(const char* actionName, double fallback)
+{
+    // Não usar GetSymbol para constantes de ação: se a OpenPPL Library não estiver
+    // carregada ou se o nome estiver errado, GetSymbol pode devolver 0 e causar
+    // uma ação errada. Estes valores vêm da OpenPPL Library oficial.
+    if (!actionName || !actionName[0]) return fallback;
+
+    if (strcmp(actionName, "Beep") == 0) return OPPL_BEEP;
+    if (strcmp(actionName, "Fold") == 0) return OPPL_FOLD;
+    if (strcmp(actionName, "Check") == 0) return OPPL_CHECK;
+    if (strcmp(actionName, "Call") == 0) return OPPL_CALL;
+    if (strcmp(actionName, "BetThirdPot") == 0 || strcmp(actionName, "RaiseThirdPot") == 0) return OPPL_RAISE_THIRD_POT;
+    if (strcmp(actionName, "BetHalfPot") == 0 || strcmp(actionName, "RaiseHalfPot") == 0) return OPPL_RAISE_HALF_POT;
+    if (strcmp(actionName, "BetTwoThirdPot") == 0 || strcmp(actionName, "RaiseTwoThirdPot") == 0) return OPPL_RAISE_TWO_THIRD_POT;
+    if (strcmp(actionName, "BetMax") == 0 || strcmp(actionName, "RaiseMax") == 0 || strcmp(actionName, "Allin") == 0) return OPPL_RAISE_MAX;
+
+    WriteLog("[user.cpp][CRITICO] constante de acao OpenPPL nao auditada: '%s'. fallback=%.0f.\n", actionName, fallback);
+    return fallback;
 }
 
 typedef void(__stdcall* FN_NewHand)      (int* stacks, int* chairs, int heroIndex, int buttonIndex, int numPlayers, int bigBlind, const char* basePath, const char* tableTitle);
@@ -124,14 +314,14 @@ static bool   g_heroRegistered = false;
 static double g_cachedDecision = 0.0;
 static int    g_cachedActionType = ACT_FOLD;
 static int    g_cachedByAmount = 0;  // em centavos
-static int    g_runtimeAllInCommitmentPercent = 66;
+static int    g_runtimeAllInCommitmentPercent = 80;
 
 // =============================================================================
 // LEITURA DE VALORES MONETÃ�RIOS EM CENTAVOS
 // $0.14 -> 14 | $3.00 -> 300 | $0.04 -> 4
 // =============================================================================
 static int ReadCents(const char* symbol) {
-    double val = GetSymbol(symbol);
+    double val = ReadOHSymbolOr(symbol, 0.0, true);
     return (int)(val * 100.0 + 0.5);
 }
 
@@ -161,7 +351,7 @@ static bool IsAtLeastConfiguredPercentOf(int intended, int realAllInAmount) {
     if (pct > 100)
         pct = 100;
 
-    return intended * 100 >= realAllInAmount * pct;
+    return (long long)intended * 100LL >= (long long)realAllInAmount * (long long)pct;
 }
 
 static bool IsPostFlopStreet(int ohStreet)
@@ -214,15 +404,32 @@ static bool ResolveOpenPPLActionConstant(const char* actionName, double* outValu
     return false;
 }
 
-
-static double NoActionOpenPPLReturnValue()
+static int ReadIntSymbolSafe(const char* symbol)
 {
-    double beep = 0.0;
-    if (ResolveOpenPPLActionConstant("Beep", &beep))
-        return beep;
+    return ReadIntOHSymbolOr(symbol, 0, false);
+}
 
-    WriteLog("[user.cpp] AVISO: Beep nao disponivel para NoAction; retornando 0.0.\n");
-    return 0.0;
+static bool IsPreflopUnopenedPot()
+{
+    // OH oficial usa foldbits1/callbits1/raisbits1 para preflop.
+    // Nomes como raisbits_preflop/callbits_preflop não são símbolos nativos.
+    int rawRaiseBits = ReadIntSymbolSafe("raisbits1");
+    int rawCallBits = ReadIntSymbolSafe("callbits1");
+
+    return rawRaiseBits == 0 && rawCallBits == 0;
+}
+
+static bool SelectOpenPPLButton(const char* preferredName, std::string& buttonName, double& buttonReturn)
+{
+    double actionCode = 0.0;
+    if (ResolveOpenPPLActionConstant(preferredName, &actionCode))
+    {
+        buttonName = preferredName;
+        buttonReturn = actionCode;
+        return true;
+    }
+
+    return false;
 }
 
 static bool TrySelectBetButtonForRaise(const DecisionResult& decision, int ohStreet, int bb, std::string& buttonName, double& buttonReturn)
@@ -242,77 +449,76 @@ static bool TrySelectBetButtonForRaise(const DecisionResult& decision, int ohStr
 
     int amountToCall = ReadCents("call");
 
-    // Preflop: somente o primeiro raise usa bet button.
-    // Na mesa, o botao 1/2 pot corresponde ao open raise padrao de 3x.
-    // Em 3bet/4bet/squeeze preflop, os bet buttons nao ficam disponiveis de forma confiavel;
-    // nesses casos usamos valor customizado em BB.
+    // Phase22: RFI preflop deve sempre usar o bet button de 1/2 pote.
+    // No ambiente alvo, esse botao equivale ao open raise padrao de 3x.
+    // Importante: preflop RFI nao pode ser detectado por amountToCall == 0.
+    // Antes de qualquer open raise, praticamente todo jogador fora do BB ainda
+    // tem fichas a completar contra o blind vivo. Por isso a deteccao usa apenas
+    // ausencia de acao voluntaria anterior: sem raise e sem call/limp antes do hero.
     if (ohStreet == 1)
     {
-        if (amountToCall == 0)
+        if (IsPreflopUnopenedPot())
         {
-            double actionCode = 0.0;
-            if (ResolveOpenPPLActionConstant("RaiseHalfPot", &actionCode))
+            if (SelectOpenPPLButton("BetHalfPot", buttonName, buttonReturn))
             {
-                buttonName = "RaiseHalfPot";
-                buttonReturn = actionCode;
+                WriteLog("[user.cpp] BetButton escolhido: BetHalfPot | contexto=RFI preflop | alvoG5=$%.2f.\n",
+                    intendedTotal / 100.0);
                 return true;
             }
         }
 
+        // 3bet/4bet/squeeze preflop: os bet buttons nao ficam disponiveis de forma confiavel.
         return false;
     }
 
     if (!IsPostFlopStreet(ohStreet))
         return false;
 
-    struct Candidate
+    // Phase22: raise postflop sempre usa BetHalfPot para usar o bet button
+    // disponivel na mesa. Embora seja raise, o nome canonico de execucao no
+    // OpenPPL pode ser BetHalfPot, que e alias de RaiseHalfPot.
+    if (amountToCall > 0)
     {
-        const char* name;
-        int numerator;
-        int denominator;
-    };
-
-    static const Candidate candidates[] =
-    {
-        { "RaiseThirdPot",    1, 3 },
-        { "RaiseHalfPot",     1, 2 },
-        { "RaiseTwoThirdPot", 2, 3 }
-    };
-
-    int bestDiff = 1000000000;
-    const Candidate* best = nullptr;
-    int bestExpected = 0;
-
-    for (const Candidate& c : candidates)
-    {
-        int expected = EstimateOHBetPotTotalCents(c.numerator, c.denominator);
-        if (expected <= 0)
-            continue;
-
-        int diff = AbsInt(expected - intendedTotal);
-        if (diff < bestDiff)
+        if (SelectOpenPPLButton("BetHalfPot", buttonName, buttonReturn))
         {
-            bestDiff = diff;
-            best = &c;
-            bestExpected = expected;
-        }
-    }
-
-    // Tolerancia estreita: evita clicar botao quando a estrategia pediu outro size real.
-    // Um centavo cobre arredondamentos do OH e da policy do G5.
-    if (best && bestDiff <= 1)
-    {
-        double actionCode = 0.0;
-        if (ResolveOpenPPLActionConstant(best->name, &actionCode))
-        {
-            buttonName = best->name;
-            buttonReturn = actionCode;
-            WriteLog("[user.cpp] BetButton escolhido: %s | alvoG5=$%.2f | alvoOHestimado=$%.2f | diff=%d cent.\n",
-                best->name, intendedTotal / 100.0, bestExpected / 100.0, bestDiff);
+            WriteLog("[user.cpp] BetButton escolhido: BetHalfPot | contexto=raise postflop | alvoG5=$%.2f | call=$%.2f.\n",
+                intendedTotal / 100.0, amountToCall / 100.0);
             return true;
         }
+
+        return false;
     }
 
+    int potAfterCall = ReadCents("pot") + amountToCall;
+    if (potAfterCall <= 0)
+        return false;
+
+    // Open bet postflop por bandas simples:
+    // pequeno  <= 45% pote -> BetThirdPot
+    // medio    <= 60% pote -> BetHalfPot
+    // grande   <= 80% pote -> BetTwoThirdPot
+    // maior que isso: caixa de edicao, exceto AllIn que usa BetMax no ACT_ALLIN.
+    const char* chosen = nullptr;
+    long long lhs = (long long)intendedTotal * 100LL;
+    long long rhs = (long long)potAfterCall;
+
+    if (lhs <= rhs * 45LL)
+        chosen = "BetThirdPot";
+    else if (lhs <= rhs * 60LL)
+        chosen = "BetHalfPot";
+    else if (lhs <= rhs * 80LL)
+        chosen = "BetTwoThirdPot";
+
+    if (chosen && SelectOpenPPLButton(chosen, buttonName, buttonReturn))
+    {
+        WriteLog("[user.cpp] BetButton escolhido: %s | contexto=open bet postflop | alvoG5=$%.2f | pot=$%.2f | fracao=%.1f%%.\n",
+            chosen, intendedTotal / 100.0, potAfterCall / 100.0,
+            100.0 * (double)intendedTotal / (double)potAfterCall);
+        return true;
+    }
+
+    WriteLog("[user.cpp] BetButton nao usado: alvoG5=$%.2f excede banda grande (%.1f%% do pote); usando caixa se a acao nao for AllIn.\n",
+        intendedTotal / 100.0, 100.0 * (double)intendedTotal / (double)potAfterCall);
     return false;
 }
 
@@ -326,18 +532,43 @@ static double CustomBetsizeReturnInBigBlinds(int raiseToTotal, int bb)
 
 static double ReadOHSymbolSafe(const char* symbol)
 {
-    __try
+    return ReadOHSymbolOr(symbol, 0.0, false);
+}
+
+static bool G5ConfigSchemaAvailable()
+{
+    static int checked = 0;
+    static int available = 0;
+
+    if (checked)
+        return available != 0;
+
+    checked = 1;
+    double schema = 0.0;
+    if (!ReadOHSymbolStrict("f$G5_ConfigSchemaVersion", &schema, false))
     {
-        return GetSymbol(symbol);
+        WriteLog("[user.cpp][CRITICO] f$G5_ConfigSchemaVersion ausente. Usando defaults internos de runtime config. Atualize G5cash.txt.\n");
+        available = 0;
+        return false;
     }
-    __except (1)
+
+    int version = (int)(schema + 0.5);
+    if (version != 23)
     {
-        return 0.0;
+        WriteLog("[user.cpp][CRITICO] f$G5_ConfigSchemaVersion=%d, esperado=23. Usando defaults internos de runtime config.\n", version);
+        available = 0;
+        return false;
     }
+
+    available = 1;
+    return true;
 }
 
 static int ReadOHConfigInt(const char* symbol, int fallback, int minValue, int maxValue)
 {
+    if (!G5ConfigSchemaAvailable())
+        return fallback;
+
     double value = ReadOHSymbolSafe(symbol);
 
     if (value != value || value < (double)minValue || value > (double)maxValue)
@@ -348,6 +579,9 @@ static int ReadOHConfigInt(const char* symbol, int fallback, int minValue, int m
 
 static double ReadOHConfigDouble(const char* symbol, double fallback, double minValue, double maxValue)
 {
+    if (!G5ConfigSchemaAvailable())
+        return fallback;
+
     double value = ReadOHSymbolSafe(symbol);
 
     if (value != value || value < minValue || value > maxValue)
@@ -364,7 +598,7 @@ static void SendRuntimeConfigToBridge()
     int logCompleto = ReadOHConfigInt("f$G5_LogCompleto", 0, 0, 1);
     int logRangesCompletos = ReadOHConfigInt("f$G5_LogRangesCompletos", 0, 0, 1);
     int allowAllInByCommitment = ReadOHConfigInt("f$G5_AllInPorCommitment", 1, 0, 1);
-    int allInCommitmentPercent = ReadOHConfigInt("f$G5_AllInCommitmentPercent", 66, 1, 100);
+    int allInCommitmentPercent = ReadOHConfigInt("f$G5_AllInCommitmentPercent", 80, 1, 100);
 
     g_runtimeAllInCommitmentPercent = allInCommitmentPercent;
 
@@ -484,8 +718,8 @@ static void LogAction(const char* source, int chair, int logIdx, int actionType,
 // CONVERSÃƒO DE CARTAS
 // =============================================================================
 static std::string FetchG5Card(const char* rankSym, const char* suitSym) {
-    int r = (int)GetSymbol(rankSym);
-    int s = (int)GetSymbol(suitSym);
+    int r = ReadIntOHSymbolOr(rankSym, -1, false);
+    int s = ReadIntOHSymbolOr(suitSym, -1, false);
     const char* ranks = "??23456789TJQKA";
     const char  suits[] = { 'h', 'd', 'c', 's' };
     if (r < 2 || r > 14 || s < 0 || s > 3) return "";
@@ -570,7 +804,7 @@ static bool Step_InitNewHand(int heroChair, int buttonChair, int bigBlindIn) {
     // playersdealtbits: bit N ligado = cadeira N recebeu cartas.
     // Isso exclui jogadores sentados em sit-out ou aguardando big blind.
     // Fallback para balance/currentbet se o sÃ­mbolo retornar 0 (inÃ­cio de sessÃ£o).
-    int dealtBits = (int)GetSymbol("playersdealtbits");
+    int dealtBits = ReadIntSymbolSafe("playersdealtbits");
     bool useDealtBits = (dealtBits != 0);
     WriteLog("[user.cpp] playersdealtbits=0x%X (%s)\n",
         dealtBits, useDealtBits ? "usando" : "fallback para balance/bet");
@@ -720,15 +954,18 @@ static bool Step_ProcessSegment(int stopChair, int targetStreet)
 
     const char* sName = StreetName(targetStreet);
     char sym[64];
-    const char* streetSuffix = (targetStreet == 1) ? "preflop"
-        : (targetStreet == 2) ? "flop"
-        : (targetStreet == 3) ? "turn" : "river";
 
-    sprintf_s(sym, sizeof(sym), "foldbits_%s", streetSuffix);  int foldBits = (int)GetSymbol(sym);
-    sprintf_s(sym, sizeof(sym), "callbits_%s", streetSuffix);  int callBits = (int)GetSymbol(sym);
-    sprintf_s(sym, sizeof(sym), "raisbits_%s", streetSuffix);  int raiseBits = (int)GetSymbol(sym);
+    if (targetStreet < 1 || targetStreet > 4)
+    {
+        WriteLog("[user.cpp][CRITICO] Step_ProcessSegment recebeu street invalida: %d.\n", targetStreet);
+        return false;
+    }
 
-    int playingBits = (int)GetSymbol("playersplayingbits");
+    sprintf_s(sym, sizeof(sym), "foldbits%d", targetStreet);  int foldBits = ReadIntSymbolSafe(sym);
+    sprintf_s(sym, sizeof(sym), "callbits%d", targetStreet);  int callBits = ReadIntSymbolSafe(sym);
+    sprintf_s(sym, sizeof(sym), "raisbits%d", targetStreet);  int raiseBits = ReadIntSymbolSafe(sym);
+
+    int playingBits = ReadIntSymbolSafe("playersplayingbits");
 
     WriteLog("[user.cpp] ProcessSegment [%s] | c%d->c%d | fold=0x%X call=0x%X raise=0x%X\n",
         sName, (g_lastEvaluatedChair + 1) % 10, stopChair,
@@ -878,8 +1115,13 @@ static void Step_ResolveEndOfPrevStreet(int oldStreet, int savedMaxBet)
             StreetName(oldStreet), savedMaxBet, savedMaxBet / 100.0);
 
     char sym[64];
-    sprintf(sym, "foldbits_%s", StreetName(oldStreet));
-    int foldBitsOld = (int)GetSymbol(sym);
+    if (oldStreet < 1 || oldStreet > 4)
+    {
+        WriteLog("[user.cpp][CRITICO] ResolveEndOfStreet recebeu street invalida: %d.\n", oldStreet);
+        return;
+    }
+    sprintf_s(sym, sizeof(sym), "foldbits%d", oldStreet);
+    int foldBitsOld = ReadIntSymbolSafe(sym);
 
     int startFrom = (g_lastEvaluatedChair + 1) % 10;
     int c = startFrom;
@@ -1202,20 +1444,27 @@ DLL_IMPLEMENTS double __stdcall ProcessQuery(const char* pquery)
         return (double)g_cachedByAmount / 100.0;
 
     InitializeBridge();
-    if (!g_bridgeLoaded)
-    {
-        if (strncmp(pquery, "dll$decisao", 11) == 0)
-            return NoActionOpenPPLReturnValue();
-
-        return 0.0;
-    }
+    if (!g_bridgeLoaded) return 0;
     SendRuntimeConfigToBridge();
     if (strncmp(pquery, "dll$decisao", 11) != 0) return 0;
 
-    int heroChair = (int)GetSymbol("userchair");
-    int buttonChair = (int)GetSymbol("dealerchair");
+    int heroChair = -1;
+    int buttonChair = -1;
+    int ohStreet = 0;
+    if (!ReadRequiredIntOHSymbol("userchair", &heroChair, 0, 9) ||
+        !ReadRequiredIntOHSymbol("dealerchair", &buttonChair, 0, 9) ||
+        !ReadRequiredIntOHSymbol("betround", &ohStreet, 1, 4))
+    {
+        WriteLog("[user.cpp][CRITICO] estado OH obrigatorio indisponivel; retornando Beep e nao enviando acao ao G5.\n");
+        return OPPL_BEEP;
+    }
+
     int bigBlind = ReadCents("bblind");
-    int ohStreet = (int)GetSymbol("betround");
+    if (bigBlind <= 0)
+    {
+        WriteLog("[user.cpp][CRITICO] bblind invalido (%d); retornando Beep.\n", bigBlind);
+        return OPPL_BEEP;
+    }
 
     WriteLog("[user.cpp] == dll$decisao | %s | heroChair=%d btnChair=%d bb=%d ($%.2f) ==\n",
         StreetName(ohStreet), heroChair, buttonChair, bigBlind, bigBlind / 100.0);
@@ -1231,8 +1480,7 @@ DLL_IMPLEMENTS double __stdcall ProcessQuery(const char* pquery)
         g_heroChair = heroChair;
         g_buttonChair = buttonChair;
 
-        if (!Step_InitNewHand(heroChair, buttonChair, bigBlind))
-            return NoActionOpenPPLReturnValue();
+        if (!Step_InitNewHand(heroChair, buttonChair, bigBlind)) return 0.0;
 
         g_isHandActive = true;
         g_currentStreet = 1;
@@ -1264,25 +1512,27 @@ decision = SafeGetDecision();
     if (decision.actionType < ACT_FOLD ||
         (decision.actionType > ACT_ALLIN && decision.actionType != ACT_NOACTION))
     {
-        WriteLog("[user.cpp] AVISO: G5Bridge retornou actionType invalido (%d). Nao executando acao neste heartbeat.\n",
+        WriteLog("[user.cpp] AVISO: G5Bridge retornou actionType invalido (%d). Retornando Beep.\n",
             decision.actionType);
-        g_cachedDecision = NoActionOpenPPLReturnValue();
+        double beep = GetOHActionSymbolSafe("Beep", -1000000.0);
+        g_cachedDecision = beep;
         g_cachedActionType = ACT_NOACTION;
         g_cachedByAmount = 0;
         g_heroActedThisStreet = false;
         g_heroRegistered = false;
-        return g_cachedDecision;
+        return beep;
     }
 
     if (decision.actionType == ACT_NOACTION)
     {
-        WriteLog("[user.cpp] G5Bridge retornou NoAction. Nao executando Fold/Check/Call por fallback.\n");
-        g_cachedDecision = NoActionOpenPPLReturnValue();
+        WriteLog("[user.cpp] G5Bridge retornou NoAction. Retornando Beep para impedir Fold/Check/Call por fallback.\n");
+        double beep = GetOHActionSymbolSafe("Beep", -1000000.0);
+        g_cachedDecision = beep;
         g_cachedActionType = ACT_NOACTION;
         g_cachedByAmount = 0;
         g_heroActedThisStreet = false;
         g_heroRegistered = false;
-        return g_cachedDecision;
+        return beep;
     }
 
     std::string finalAction;
@@ -1341,8 +1591,8 @@ decision = SafeGetDecision();
             IsAtLeastConfiguredPercentOf(intended, realAllInTotal);
 
         if (validAllIn) {
-            finalAction = "RaiseMax";
-            returnValue = GetOHActionSymbolSafe("RaiseMax", 5.0);
+            finalAction = "BetMax";
+            returnValue = GetOHActionSymbolSafe("BetMax", -1000009.0);
 
             WriteLog("[user.cpp] ALLIN VALIDADO %d%%: intended=%d ($%.2f), balance c%d=%d ($%.2f), currentbet c%d=%d ($%.2f), total=%d ($%.2f).\n",
                 g_runtimeAllInCommitmentPercent,
@@ -1383,24 +1633,26 @@ decision = SafeGetDecision();
 
     default:
         WriteLog("[user.cpp] AVISO: actionType inesperado apos validacao (%d). NoAction.\n", decision.actionType);
-        g_cachedDecision = NoActionOpenPPLReturnValue();
+        double beep = GetOHActionSymbolSafe("Beep", -1000000.0);
+        g_cachedDecision = beep;
         g_cachedActionType = ACT_NOACTION;
         g_cachedByAmount = 0;
         g_heroActedThisStreet = false;
         g_heroRegistered = false;
-        return g_cachedDecision;
+        return beep;
     }
 
     if (isCustomRaise && returnValue <= 0.0)
     {
         WriteLog("[user.cpp] ERRO: custom raise sem size valido. byAmount=%d bb=%d. Retornando NoAction.\n",
             decision.byAmount, bb);
-        g_cachedDecision = NoActionOpenPPLReturnValue();
+        double beep = GetOHActionSymbolSafe("Beep", -1000000.0);
+        g_cachedDecision = beep;
         g_cachedActionType = ACT_NOACTION;
         g_cachedByAmount = 0;
         g_heroActedThisStreet = false;
         g_heroRegistered = false;
-        return g_cachedDecision;
+        return beep;
     }
 
     double actualReturnValue = returnValue;
