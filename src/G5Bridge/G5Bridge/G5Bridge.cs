@@ -77,7 +77,7 @@ private static bool _handSyncFailed = false;
         private static bool _runtimeLogRangesCompletos = false;
         private static bool _runtimeFastPostFlopEVEnabled = true;
         private static bool _runtimeAllowAllInByCommitment = true;
-        private static int _runtimeAllInCommitmentPercent = 66;
+        private static int _runtimeAllInCommitmentPercent = 80;
         private static bool _runtimeAllowHighSprAllInCandidate = false;
         private static double _runtimeMaxSprForAllInCandidate = 1.25;
 
@@ -398,6 +398,16 @@ private static bool _handSyncFailed = false;
         [MethodImpl(MethodImplOptions.Synchronized)]
         public static void WarmUp([MarshalAs(UnmanagedType.LPStr)] string basePath)
         {
+            // Phase25C: warmup pesado removido do callback nativo do OpenHoldem.
+            // O log da phase25B mostra reinicios duros entre "WarmUp iniciado" e
+            // "WarmUp concluido". Como excecoes gerenciadas seriam registradas pelo
+            // catch abaixo, a queda ocorria no boundary nativo/CLR durante carga pesada
+            // de modelos/charts dentro de DLLUpdateOnConnection/process_message(load).
+            //
+            // A solucao estrutural e separar ciclo de vida: este metodo agora apenas
+            // configura o caminho nativo. Modelos, charts e GameState sao carregados
+            // de forma lazy no primeiro NewHand valido, dentro do fluxo sincronizado
+            // normal da bridge e com parametros reais da mesa.
             try
             {
                 if (string.IsNullOrWhiteSpace(basePath))
@@ -405,43 +415,7 @@ private static bool _handSyncFailed = false;
 
                 _basePath = Path.GetFullPath(basePath);
                 ConfigureNativeDllPath();
-                Log($"[WarmUp] Iniciando warmup. basePath={basePath}");
-
-                var model6 = GetCachedOpponentModeling(basePath, false, "WarmUp/6max");
-                using (var est6 = new ModelingEstimator(model6, PokerClient.PokerStars))
-                using (var gs6 = new BotGameState(
-                    new[] { "WU0", "WU1", "WU2", "WU3", "WU4", "WU5" },
-                    new[] { 400, 400, 400, 400, 400, 400 },
-                    0,
-                    0,
-                    4,
-                    PokerClient.PokerStars,
-                    TableType.SixMax,
-                    est6,
-                    randomlySampleActions: false,
-                    preFlopChartsLevel: 4))
-                {
-                    Log($"[WarmUp] 6max charts: {gs6.getPreFlopChartsInfo()}");
-                }
-
-                var modelHu = GetCachedOpponentModeling(basePath, true, "WarmUp/HU");
-                using (var estHu = new ModelingEstimator(modelHu, PokerClient.PokerStars))
-                using (var gsHu = new BotGameState(
-                    new[] { "WU_HU0", "WU_HU1" },
-                    new[] { 200, 200 },
-                    0,
-                    0,
-                    2,
-                    PokerClient.PokerStars,
-                    TableType.HeadsUp,
-                    estHu,
-                    randomlySampleActions: false,
-                    preFlopChartsLevel: 4))
-                {
-                    Log($"[WarmUp] HU charts: {gsHu.getPreFlopChartsInfo()}");
-                }
-
-                Log("[WarmUp] Concluido.");
+                Log($"[WarmUp] Lightweight concluido. basePath={_basePath}");
             }
             catch (Exception ex)
             {
@@ -466,11 +440,10 @@ private static bool _handSyncFailed = false;
             [MarshalAs(UnmanagedType.LPStr)] string basePath,
             [MarshalAs(UnmanagedType.LPStr)] string tableTitle)
         {
-HeroDeuFold = false;
-_streetSyncFailed = false;
-_handSyncFailed = false;
-HeroLogicalIndex = heroIndex;
-            CurrentChairs = (int[])chairs.Clone();
+            HeroDeuFold = false;
+            _streetSyncFailed = false;
+            _handSyncFailed = false;
+            HeroLogicalIndex = heroIndex;
             CurrentBigBlind = bigBlind;
 
             string oldBasePath = _basePath;
@@ -482,31 +455,34 @@ HeroLogicalIndex = heroIndex;
                 ? m.Value
                 : (tableTitle ?? "").Split(new char[] { ',', ' ', '-' })[0].Trim();
 
-_numPlayers = numPlayers;
-_buttonIndex = buttonIndex;
+            _numPlayers = numPlayers;
+            _buttonIndex = buttonIndex;
 
-Log("===========================  NOVA MAO  ===========================");
-Log($"[NewHand] table={_targetTableId} players={numPlayers} hero={heroIndex} btn={buttonIndex} bb={bigBlind}");
-if (stacks != null) Log($"[NewHand] stacks=[{string.Join(", ", stacks)}]");
+            Log("===========================  NOVA MAO  ===========================");
+            Log($"[NewHand] table={_targetTableId} players={numPlayers} hero={heroIndex} btn={buttonIndex} bb={bigBlind}");
+            if (stacks != null) Log($"[NewHand] stacks=[{string.Join(", ", stacks)}]");
 
-if (stacks == null || chairs == null ||
-    numPlayers < 2 ||
-    stacks.Length < numPlayers ||
-    chairs.Length < numPlayers ||
-    heroIndex < 0 || heroIndex >= numPlayers ||
-    buttonIndex < 0 || buttonIndex >= numPlayers ||
-    bigBlind <= 0)
-{
-    _gameState = null;
-    _handSyncFailed = true;
+            if (stacks == null || chairs == null ||
+                numPlayers < 2 ||
+                stacks.Length < numPlayers ||
+                chairs.Length < numPlayers ||
+                heroIndex < 0 || heroIndex >= numPlayers ||
+                buttonIndex < 0 || buttonIndex >= numPlayers ||
+                bigBlind <= 0)
+            {
+                _gameState = null;
+                CurrentChairs = null;
+                _handSyncFailed = true;
 
-    Log($"[NewHand] ERRO DE ESTADO: parametros invalidos. " +
-        $"players={numPlayers}, hero={heroIndex}, btn={buttonIndex}, bb={bigBlind}, " +
-        $"stacksLen={(stacks == null ? -1 : stacks.Length)}, chairsLen={(chairs == null ? -1 : chairs.Length)}. " +
-        $"Mao bloqueada ate o proximo NewHand valido.");
+                Log($"[NewHand] ERRO DE ESTADO: parametros invalidos. " +
+                    $"players={numPlayers}, hero={heroIndex}, btn={buttonIndex}, bb={bigBlind}, " +
+                    $"stacksLen={(stacks == null ? -1 : stacks.Length)}, chairsLen={(chairs == null ? -1 : chairs.Length)}. " +
+                    $"Mao bloqueada ate o proximo NewHand valido.");
 
-    return;
-}
+                return;
+            }
+
+            CurrentChairs = (int[])chairs.Clone();
 
             if (EnableXML)
                 HHParser.AtualizarMesa(_targetTableId, numPlayers, bigBlind, heroIndex, chairs);
@@ -602,6 +578,25 @@ private static void InternalNewAction(int playerLogIdx, int actionType, int byAm
     try
     {
         int max = _gameState.getPlayers().Count, att = 0;
+
+        if (_gameState.getPlayerToActInd() < 0)
+        {
+            if (_gameState.CanIgnoreResidualActionAfterClosedRound(playerLogIdx))
+            {
+                Log($"[{src}] Acao residual ignorada apos rodada fechada: recebido=" +
+                    $"{GetPositionName(playerLogIdx, _buttonIndex, _numPlayers)}({playerLogIdx}) " +
+                    $"acao={GetActionName(actionType)} by {byAmount}. " +
+                    "Estado G5 ja estava fechado e sem pendencia de call para jogadores non-all-in.");
+                return;
+            }
+
+            _handSyncFailed = true;
+            Log($"[{src}] DESYNC: G5 indica rodada fechada playerToAct=-1, mas recebeu " +
+                $"{GetPositionName(playerLogIdx, _buttonIndex, _numPlayers)}({playerLogIdx}) " +
+                $"acao={GetActionName(actionType)} by {byAmount}. " +
+                "A acao nao passou na validacao residual; bloqueando a mao.");
+            return;
+        }
 
         while (_gameState.getPlayerToActInd() != playerLogIdx
                && _gameState.getPlayerToActInd() >= 0 && att < max)
@@ -876,7 +871,14 @@ if (_handSyncFailed || _streetSyncFailed)
                 result.betRaiseEV = d.betRaiseEV;
 
                 Log($"[GetDecision] DECISAO: {GetActionName(result.actionType)} by {result.byAmount}");
-                Log($"[GetDecision] EVs G5/DecisionMaking: cc={result.checkCallEV:F3} br={result.betRaiseEV:F3}");
+                if (d.usedPreFlopChart)
+                {
+                    Log($"[GetDecision] ChartScore preflop: fold={d.chartFoldProb:F3} call={d.chartCallProb:F3} raise={d.chartRaiseProb:F3} allin={d.chartAllInProb:F3}");
+                }
+                else
+                {
+                    Log($"[GetDecision] EVs G5/DecisionMaking: cc={result.checkCallEV:F3} br={result.betRaiseEV:F3}");
+                }
                 Log("[GetDecision] Equity OH: removida; nao usada para decidir nem para corrigir fold/call.");
                 Log($"[GetDecision] Motivo: {d.message}");
 
@@ -1447,3 +1449,4 @@ public static void Log(string message)
         }
     }
 }
+

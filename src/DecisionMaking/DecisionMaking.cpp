@@ -283,7 +283,7 @@ namespace G5Cpp
         static bool g_DMForceRootBetRaiseAmount = false;
         static int g_DMForcedRootBetRaiseAmount = 0;
 
-        // Profundidade adaptativa de raiz pós-flop.
+        // Profundidade adaptativa de raiz pÃ³s-flop.
         // Unidades: milissegundos * 1000 para permitir Interlocked em LONG.
         static volatile LONG g_DMFlopQuickRootAvgMsX1000 = 0;
         static volatile LONG g_DMDeepRootAvgMsX1000 = 0;
@@ -1689,27 +1689,27 @@ namespace G5Cpp
 
         static bool DMShouldUseTurnCutoffAtStreetTransition(const GameState& prms, int& complexityScore)
         {
-            // Phase22 revisão: não transformar todo root-turn em cutoff.
+            // Phase22 revisÃ£o: nÃ£o transformar todo root-turn em cutoff.
             //
-            // 1) Se a avaliação começou no flop e chegou ao turn, mantemos cutoff.
-            //    Esse é o caso que derrubava/travava a phase19: a árvore de flop
-            //    já expandiu até o turn e, se deixarmos abrir river + ações futuras,
-            //    a ramificação cresce demais.
+            // 1) Se a avaliaÃ§Ã£o comeÃ§ou no flop e chegou ao turn, mantemos cutoff.
+            //    Esse Ã© o caso que derrubava/travava a phase19: a Ã¡rvore de flop
+            //    jÃ¡ expandiu atÃ© o turn e, se deixarmos abrir river + aÃ§Ãµes futuras,
+            //    a ramificaÃ§Ã£o cresce demais.
             //
-            // 2) Se a avaliação começou diretamente no turn, usamos full tree salvo
+            // 2) Se a avaliaÃ§Ã£o comeÃ§ou diretamente no turn, usamos full tree salvo
             //    quando uma estimativa estrutural simples indicar spot pesado.
-            //    A estimativa é deliberadamente conservadora e usa apenas dados nativos
-            //    do GameState, sem equity do OpenHoldem e sem heurística de força de mão.
+            //    A estimativa Ã© deliberadamente conservadora e usa apenas dados nativos
+            //    do GameState, sem equity do OpenHoldem e sem heurÃ­stica de forÃ§a de mÃ£o.
             int activePlayers = prms.numActivePlayers();
             int activeNonAllInEstimate = prms.startNumActive;
             if (activeNonAllInEstimate < activePlayers)
                 activeNonAllInEstimate = activePlayers;
 
-            // numActiveNonAllInPlayers() é método privado de GameState; fora da classe
-            // usamos startNumActive como estimativa conservadora compilável.
-            // Ao entrar no river, numBets será resetado. Portanto o maior fator de
-            // custo futuro é: quantos jogadores ainda podem apostar e quantas apostas
-            // por street serão permitidas no river.
+            // numActiveNonAllInPlayers() Ã© mÃ©todo privado de GameState; fora da classe
+            // usamos startNumActive como estimativa conservadora compilÃ¡vel.
+            // Ao entrar no river, numBets serÃ¡ resetado. Portanto o maior fator de
+            // custo futuro Ã©: quantos jogadores ainda podem apostar e quantas apostas
+            // por street serÃ£o permitidas no river.
             int riverBetSlots = prms.BETS_CUTOFF_POST_FLOP;
             if (riverBetSlots < 0)
                 riverBetSlots = 0;
@@ -1725,14 +1725,14 @@ namespace G5Cpp
             if (prms.startedOnFlop)
                 complexityScore += 6;
 
-            // Caso de estabilidade: avaliação iniciada no flop continua usando cutoff,
-            // inclusive HU. Isso protege os spots de flop que já provaram travar quando
-            // a árvore era deixada ir completa até river.
+            // Caso de estabilidade: avaliaÃ§Ã£o iniciada no flop continua usando cutoff,
+            // inclusive HU. Isso protege os spots de flop que jÃ¡ provaram travar quando
+            // a Ã¡rvore era deixada ir completa atÃ© river.
             if (prms.startedOnFlop)
                 return true;
 
-            // Root turn HU ou 3-way simples normalmente é aceitável e preserva maior
-            // fidelidade estratégica. Multiway 4+ ou score alto vira cutoff nativo.
+            // Root turn HU ou 3-way simples normalmente Ã© aceitÃ¡vel e preserva maior
+            // fidelidade estratÃ©gica. Multiway 4+ ou score alto vira cutoff nativo.
             return complexityScore >= 12;
         }
 
@@ -1758,11 +1758,11 @@ namespace G5Cpp
                 }
                 else // Go to next street
                 {
-                    // Phase22 revisão: turn só vira cutoff nativo quando a própria
-                    // estrutura da árvore indicar risco de explosão combinatória.
-                    // Avaliações iniciadas no flop continuam cortando ao chegar no turn;
-                    // avaliações iniciadas diretamente no turn usam full tree em spots
-                    // simples, preservando melhor qualidade estratégica.
+                    // Phase22 revisÃ£o: turn sÃ³ vira cutoff nativo quando a prÃ³pria
+                    // estrutura da Ã¡rvore indicar risco de explosÃ£o combinatÃ³ria.
+                    // AvaliaÃ§Ãµes iniciadas no flop continuam cortando ao chegar no turn;
+                    // avaliaÃ§Ãµes iniciadas diretamente no turn usam full tree em spots
+                    // simples, preservando melhor qualidade estratÃ©gica.
                     if (prms.street == Street_Turn)
                     {
                         int turnComplexityScore = 0;
@@ -1830,8 +1830,8 @@ DMResetDiagnosticCounters();
             bigBlindSize
         );
 
-        // Inicializa os EVs para valores reconhec�veis.
-        // Estes valores N�O devem ser usados como decis�o, servem apenas para diagn�stico
+        // Inicializa os EVs para valores reconhecï¿½veis.
+        // Estes valores Nï¿½O devem ser usados como decisï¿½o, servem apenas para diagnï¿½stico
         // caso a chamada seja interrompida antes de calcular os EVs reais.
         checkCallEV = -999999.0f;
         betRaiseEV = -999999.0f;
@@ -1984,7 +1984,12 @@ DMResetDiagnosticCounters();
 
                     GameState deepPrms = prms;
                     deepPrms.BETS_CUTOFF_POST_FLOP = 3;
-                    deepPrms.startedOnFlop = false;
+
+                    // Nao apagar a origem real da avaliacao.
+                    // Se a raiz nasceu no flop, o turn/river precisa manter
+                    // a politica de cutoff estrutural para impedir explosao
+                    // de arvore em spots marginalmente profundos.
+                    deepPrms.startedOnFlop = prms.startedOnFlop;
 
                     DMStats deepStats;
                     float deepCheckCallEV = -999999.0f;
@@ -2148,3 +2153,5 @@ DMResetDiagnosticCounters();
     }
 
 }
+
+

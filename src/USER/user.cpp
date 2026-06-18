@@ -72,6 +72,8 @@ static const double OPPL_FOLD = -1000001.0;
 static const double OPPL_RAISE_THIRD_POT = -1000004.0;
 static const double OPPL_RAISE_HALF_POT = -1000005.0;
 static const double OPPL_RAISE_TWO_THIRD_POT = -1000006.0;
+static const double OPPL_RAISE_THREE_QUARTER_POT = -1000007.0;
+static const double OPPL_RAISE_POT = -1000008.0;
 static const double OPPL_RAISE_MAX = -1000009.0;
 static const double OPPL_CALL = -1000010.0;
 
@@ -252,6 +254,8 @@ static double GetOHActionSymbolSafe(const char* actionName, double fallback)
     if (strcmp(actionName, "BetThirdPot") == 0 || strcmp(actionName, "RaiseThirdPot") == 0) return OPPL_RAISE_THIRD_POT;
     if (strcmp(actionName, "BetHalfPot") == 0 || strcmp(actionName, "RaiseHalfPot") == 0) return OPPL_RAISE_HALF_POT;
     if (strcmp(actionName, "BetTwoThirdPot") == 0 || strcmp(actionName, "RaiseTwoThirdPot") == 0) return OPPL_RAISE_TWO_THIRD_POT;
+    if (strcmp(actionName, "BetThreeQuarterPot") == 0 || strcmp(actionName, "RaiseThreeQuarterPot") == 0) return OPPL_RAISE_THREE_QUARTER_POT;
+    if (strcmp(actionName, "BetPot") == 0 || strcmp(actionName, "RaisePot") == 0) return OPPL_RAISE_POT;
     if (strcmp(actionName, "BetMax") == 0 || strcmp(actionName, "RaiseMax") == 0 || strcmp(actionName, "Allin") == 0) return OPPL_RAISE_MAX;
 
     WriteLog("[user.cpp][CRITICO] constante de acao OpenPPL nao auditada: '%s'. fallback=%.0f.\n", actionName, fallback);
@@ -316,6 +320,60 @@ static int    g_cachedActionType = ACT_FOLD;
 static int    g_cachedByAmount = 0;  // em centavos
 static int    g_runtimeAllInCommitmentPercent = 80;
 
+
+// Phase25C: todas as entradas vindas do OpenHoldem passam pela mesma user.dll
+// e compartilham estado local de mao. O OH pode consultar simbolos em sequencia
+// muito curta e algumas rotas internas chamam ProcessQuery recursivamente para
+// preencher cache. CRITICAL_SECTION e reentrante por thread, ao contrario de
+// SRWLOCK, e portanto protege o estado sem deadlock no cache path.
+static INIT_ONCE g_processLockInitOnce = INIT_ONCE_STATIC_INIT;
+static CRITICAL_SECTION g_processLock;
+
+static BOOL CALLBACK InitProcessLockOnce(PINIT_ONCE, PVOID, PVOID*)
+{
+    InitializeCriticalSection(&g_processLock);
+    return TRUE;
+}
+
+class ScopedProcessLock
+{
+public:
+    ScopedProcessLock()
+    {
+        InitOnceExecuteOnce(&g_processLockInitOnce, InitProcessLockOnce, NULL, NULL);
+        EnterCriticalSection(&g_processLock);
+    }
+
+    ~ScopedProcessLock()
+    {
+        LeaveCriticalSection(&g_processLock);
+    }
+};
+
+static void ResetLocalHandSyncState()
+{
+    g_isHandActive = false;
+    g_cardsDealt = false;
+    g_currentStreet = 0;
+    g_heroChair = -1;
+    g_buttonChair = -1;
+    g_numLogicalPlayers = 0;
+    g_streetEndMaxBet = 0;
+    g_lastEvaluatedChair = -1;
+
+    g_heroActedThisStreet = false;
+    g_heroRegistered = false;
+    g_cachedDecision = OPPL_BEEP;
+    g_cachedActionType = ACT_NOACTION;
+    g_cachedByAmount = 0;
+
+    memset(g_chairToLogical, -1, sizeof(g_chairToLogical));
+    memset(g_isActive, 0, sizeof(g_isActive));
+    memset(g_lastPlayerBets, 0, sizeof(g_lastPlayerBets));
+    memset(g_hasCheckedThisStreet, 0, sizeof(g_hasCheckedThisStreet));
+    memset(g_wentAllIn, 0, sizeof(g_wentAllIn));
+}
+
 // =============================================================================
 // LEITURA DE VALORES MONETÃ�RIOS EM CENTAVOS
 // $0.14 -> 14 | $3.00 -> 300 | $0.04 -> 4
@@ -362,6 +420,11 @@ static bool IsPostFlopStreet(int ohStreet)
 static int AbsInt(int v)
 {
     return v < 0 ? -v : v;
+}
+
+static double AbsDouble(double v)
+{
+    return v < 0.0 ? -v : v;
 }
 
 static int RoundDivInt(int value, int divisor)
@@ -497,6 +560,7 @@ static bool TrySelectBetButtonForRaise(const DecisionResult& decision, int ohStr
     // pequeno  <= 45% pote -> BetThirdPot
     // medio    <= 60% pote -> BetHalfPot
     // grande   <= 80% pote -> BetTwoThirdPot
+    // pot-size <=120% pote -> BetPot
     // maior que isso: caixa de edicao, exceto AllIn que usa BetMax no ACT_ALLIN.
     const char* chosen = nullptr;
     long long lhs = (long long)intendedTotal * 100LL;
@@ -508,6 +572,8 @@ static bool TrySelectBetButtonForRaise(const DecisionResult& decision, int ohStr
         chosen = "BetHalfPot";
     else if (lhs <= rhs * 80LL)
         chosen = "BetTwoThirdPot";
+    else if (lhs <= rhs * 120LL)
+        chosen = "BetPot";
 
     if (chosen && SelectOpenPPLButton(chosen, buttonName, buttonReturn))
     {
@@ -528,6 +594,82 @@ static double CustomBetsizeReturnInBigBlinds(int raiseToTotal, int bb)
         return 0.0;
 
     return (double)raiseToTotal / (double)bb;
+}
+
+static bool IsCachedCustomBetsizeAction()
+{
+    return g_cachedDecision > 0.0 &&
+        (g_cachedActionType == ACT_BET || g_cachedActionType == ACT_RAISE || g_cachedActionType == ACT_ALLIN);
+}
+
+static bool CachedDecisionIs(double opplAction)
+{
+    return AbsDouble(g_cachedDecision - opplAction) < 0.5;
+}
+
+static bool QueryMatches(const char* pquery, const char* expected)
+{
+    return pquery && expected && strncmp(pquery, expected, strlen(expected)) == 0;
+}
+
+static bool IsAutoplayerCachedQuery(const char* pquery)
+{
+    return QueryMatches(pquery, "dll$alli") ||
+        QueryMatches(pquery, "dll$betpot_2_1") ||
+        QueryMatches(pquery, "dll$betpot_1_1") ||
+        QueryMatches(pquery, "dll$betpot_3_4") ||
+        QueryMatches(pquery, "dll$betpot_2_3") ||
+        QueryMatches(pquery, "dll$betpot_1_2") ||
+        QueryMatches(pquery, "dll$betpot_1_3") ||
+        QueryMatches(pquery, "dll$betpot_1_4") ||
+        QueryMatches(pquery, "dll$betsize") ||
+        QueryMatches(pquery, "dll$rais") ||
+        QueryMatches(pquery, "dll$call") ||
+        QueryMatches(pquery, "dll$check") ||
+        QueryMatches(pquery, "dll$fold");
+}
+
+static double EvaluateCachedAutoplayerQuery(const char* pquery)
+{
+    if (!pquery) return 0.0;
+
+    if (QueryMatches(pquery, "dll$alli"))
+        return (g_cachedActionType == ACT_ALLIN || CachedDecisionIs(OPPL_RAISE_MAX)) ? 1.0 : 0.0;
+
+    if (QueryMatches(pquery, "dll$betpot_1_3"))
+        return CachedDecisionIs(OPPL_RAISE_THIRD_POT) ? 1.0 : 0.0;
+
+    if (QueryMatches(pquery, "dll$betpot_1_2"))
+        return CachedDecisionIs(OPPL_RAISE_HALF_POT) ? 1.0 : 0.0;
+
+    if (QueryMatches(pquery, "dll$betpot_2_3"))
+        return CachedDecisionIs(OPPL_RAISE_TWO_THIRD_POT) ? 1.0 : 0.0;
+
+    if (QueryMatches(pquery, "dll$betpot_3_4"))
+        return CachedDecisionIs(OPPL_RAISE_THREE_QUARTER_POT) ? 1.0 : 0.0;
+
+    if (QueryMatches(pquery, "dll$betpot_1_1"))
+        return CachedDecisionIs(OPPL_RAISE_POT) ? 1.0 : 0.0;
+
+    if (QueryMatches(pquery, "dll$betpot_2_1") || QueryMatches(pquery, "dll$betpot_1_4"))
+        return 0.0;
+
+    if (QueryMatches(pquery, "dll$betsize"))
+        return IsCachedCustomBetsizeAction() ? (double)g_cachedByAmount / 100.0 : 0.0;
+
+    if (QueryMatches(pquery, "dll$rais"))
+        return 0.0;
+
+    if (QueryMatches(pquery, "dll$call"))
+        return (g_cachedActionType == ACT_CALL && g_cachedDecision != OPPL_BEEP) ? 1.0 : 0.0;
+
+    if (QueryMatches(pquery, "dll$check"))
+        return (g_cachedActionType == ACT_CHECK && g_cachedDecision != OPPL_BEEP) ? 1.0 : 0.0;
+
+    if (QueryMatches(pquery, "dll$fold"))
+        return (g_cachedActionType == ACT_FOLD && g_cachedDecision != OPPL_BEEP) ? 1.0 : 0.0;
+
+    return 0.0;
 }
 
 static double ReadOHSymbolSafe(const char* symbol)
@@ -553,9 +695,9 @@ static bool G5ConfigSchemaAvailable()
     }
 
     int version = (int)(schema + 0.5);
-    if (version != 23)
+    if (version != 25)
     {
-        WriteLog("[user.cpp][CRITICO] f$G5_ConfigSchemaVersion=%d, esperado=23. Usando defaults internos de runtime config.\n", version);
+        WriteLog("[user.cpp][CRITICO] f$G5_ConfigSchemaVersion=%d, esperado=25. Usando defaults internos de runtime config.\n", version);
         available = 0;
         return false;
     }
@@ -831,6 +973,24 @@ static bool Step_InitNewHand(int heroChair, int buttonChair, int bigBlindIn) {
             activeChairs[numActive++] = c;
     }
 
+    bool buttonWasDealt = false;
+    for (int i = 0; i < numActive; i++)
+    {
+        if (activeChairs[i] == buttonChair)
+        {
+            buttonWasDealt = true;
+            break;
+        }
+    }
+
+    if (!buttonWasDealt)
+    {
+        WriteLog("[user.cpp][CRITICO] dealerchair c%d nao esta em playersdealtbits=0x%X. "
+                 "Estado de scrape/mao incompleto; nao sera criada NewHand na Bridge.\n",
+                 buttonChair, dealtBits);
+        return false;
+    }
+
     int sbChair = -1, bbChair = -1;
 
     // 2. Regra de PosiÃ§Ã£o (HU vs Normal)
@@ -924,6 +1084,19 @@ static bool Step_InitNewHand(int heroChair, int buttonChair, int bigBlindIn) {
 
     if (heroLogical < 0 || g_numLogicalPlayers < 2) {
         WriteLog("[user.cpp] FALHA: herÃ³i nÃ£o encontrado ou mesa vazia.\n");
+        return false;
+    }
+
+    if (buttonLogical < 0 || buttonLogical >= g_numLogicalPlayers) {
+        WriteLog("[user.cpp][CRITICO] buttonLogical invalido (%d) apos mapeamento. "
+                 "Nao enviando NewHand para Bridge.\n", buttonLogical);
+        return false;
+    }
+
+    if (sbChair < 0 || bbChair < 0) {
+        WriteLog("[user.cpp][CRITICO] blinds nao inferidos de forma consistente. "
+                 "sbChair=%d bbChair=%d numActive=%d. Nao enviando NewHand para Bridge.\n",
+                 sbChair, bbChair, numActive);
         return false;
     }
 
@@ -1179,27 +1352,65 @@ static void Step_ResolveEndOfPrevStreet(int oldStreet, int savedMaxBet)
 // =============================================================================
 // PASSO 4: TRANSIÃ‡ÃƒO DE STREET
 // =============================================================================
-static void Step_AdvanceStreetIfNeeded(int ohStreet)
+static bool Step_AdvanceStreetIfNeeded(int ohStreet)
 {
-    if (ohStreet <= g_currentStreet) return;
+    if (ohStreet <= g_currentStreet)
+        return true;
+
+    if (ohStreet < 1 || ohStreet > 4)
+    {
+        WriteLog("[user.cpp][CRITICO] Street OH invalida: %d. Resetando estado local.\n", ohStreet);
+        ResetLocalHandSyncState();
+        return false;
+    }
+
+    if (ohStreet != g_currentStreet + 1)
+    {
+        WriteLog("[user.cpp][CRITICO] Salto de street invalido: %s -> %s. "
+                 "Nao eh seguro reconstruir streets intermediarias sem historico de acoes. "
+                 "Resetando estado local e aguardando proxima mao preflop.\n",
+                 StreetName(g_currentStreet), StreetName(ohStreet));
+
+        ResetLocalHandSyncState();
+        return false;
+    }
 
     std::string c0, c1, c2, c3;
-    if (ohStreet == 2) {
+
+    if (ohStreet == 2)
+    {
         c0 = FetchG5Card("$$cr0", "$$cs0");
         c1 = FetchG5Card("$$cr1", "$$cs1");
         c2 = FetchG5Card("$$cr2", "$$cs2");
-        if (c0.empty() || c1.empty() || c2.empty()) {
-            WriteLog("[user.cpp] AVISO: Cartas do flop ainda nÃ£o disponÃ­veis.\n");
-            return;
+
+        if (c0.empty() || c1.empty() || c2.empty())
+        {
+            WriteLog("[user.cpp] AVISO: Cartas do flop ainda nao disponiveis. "
+                     "Nao avancando street nem chamando decisao.\n");
+            return false;
         }
     }
-    else if (ohStreet == 3) {
+    else if (ohStreet == 3)
+    {
         c3 = FetchG5Card("$$cr3", "$$cs3");
-        if (c3.empty()) { WriteLog("[user.cpp] AVISO: Turn ainda nÃ£o disponÃ­vel.\n"); return; }
+
+        if (c3.empty())
+        {
+            WriteLog("[user.cpp] AVISO: Turn ainda nao disponivel. "
+                     "Nao avancando street nem chamando decisao.\n");
+            return false;
+        }
     }
-    else if (ohStreet == 4) {
+    else if (ohStreet == 4)
+    {
         c3 = FetchG5Card("$$cr4", "$$cs4");
-        if (c3.empty()) { WriteLog("[user.cpp] AVISO: River ainda nÃ£o disponÃ­vel.\n"); return; }
+
+        if (c3.empty())
+        {
+            WriteLog("[user.cpp] AVISO: River ainda nao disponivel. "
+                     "Nao avancando street nem chamando decisao.\n");
+            return false;
+        }
     }
 
     WriteLog("[user.cpp] ----------------------------------------\n");
@@ -1208,10 +1419,12 @@ static void Step_AdvanceStreetIfNeeded(int ohStreet)
 
     int savedMaxBet = g_streetEndMaxBet;
 
-    if (g_heroActedThisStreet && !g_heroRegistered) {
+    if (g_heroActedThisStreet && !g_heroRegistered)
+    {
         char symBet[32], symBal[32];
         sprintf(symBet, "currentbet%d", g_heroChair);
         sprintf(symBal, "balance%d", g_heroChair);
+
         int heroBet = ReadCents(symBet);
         int heroBal = ReadCents(symBal);
         int heroDelta = heroBet - g_lastPlayerBets[g_heroChair];
@@ -1219,32 +1432,39 @@ static void Step_AdvanceStreetIfNeeded(int ohStreet)
         G5Action realAction;
         int realAmount = heroDelta > 0 ? heroDelta : g_cachedByAmount;
 
-        if (heroBal == 0 && heroBet > 0) {
+        if (heroBal == 0 && heroBet > 0)
+        {
             realAction = ACT_ALLIN;
             g_wentAllIn[g_heroChair] = true;
         }
-        else if (heroDelta > 0 && savedMaxBet > 0) {
+        else if (heroDelta > 0 && savedMaxBet > 0)
+        {
             realAction = (heroBet == savedMaxBet) ? ACT_CALL : ACT_RAISE;
         }
-        else if (heroDelta > 0) {
+        else if (heroDelta > 0)
+        {
             realAction = (G5Action)g_cachedActionType;
         }
-        else if (g_cachedActionType == ACT_CHECK) {
+        else if (g_cachedActionType == ACT_CHECK)
+        {
             realAction = ACT_CHECK;
             realAmount = 0;
         }
-        else {
+        else
+        {
             realAction = (G5Action)g_cachedActionType;
         }
 
         g_lastPlayerBets[g_heroChair] += realAmount;
+
         if (g_lastPlayerBets[g_heroChair] > savedMaxBet)
             savedMaxBet = g_lastPlayerBets[g_heroChair];
 
         SafeNewAction(g_chairToLogical[g_heroChair], (int)realAction, realAmount);
         g_heroRegistered = true;
         g_lastEvaluatedChair = g_heroChair;
-        LogAction("HerÃ³i(troca-street)", g_heroChair, g_chairToLogical[g_heroChair],
+
+        LogAction("Heroi(troca-street)", g_heroChair, g_chairToLogical[g_heroChair],
             (int)realAction, realAmount);
     }
 
@@ -1261,11 +1481,13 @@ static void Step_AdvanceStreetIfNeeded(int ohStreet)
     g_streetEndMaxBet = 0;
     g_heroActedThisStreet = false;
     g_heroRegistered = false;
+
     memset(g_lastPlayerBets, 0, sizeof(g_lastPlayerBets));
     memset(g_hasCheckedThisStreet, 0, sizeof(g_hasCheckedThisStreet));
 
-    // ðŸ�† O relÃ³gio pÃ³s-flop! Recua para o BotÃ£o (SB) primeiro em HU!
     g_lastEvaluatedChair = g_buttonChair;
+
+    return true;
 }
 
 // =============================================================================
@@ -1335,22 +1557,11 @@ if (pNewHand && pDealHoleCards && pNewAction && pGoToNextStreet && pGetDecision)
 
 static void WarmUpBridgeIfPossible(const char* source)
 {
-    InitializeBridge();
-
-    if (!g_bridgeLoaded || !pWarmUp || g_bridgeWarmUpDone)
-        return;
-
-    __try
-    {
-        WriteLog("[user.cpp] WarmUp G5Bridge iniciado por %s.\n", source ? source : "<unknown>");
-        pWarmUp(g_g5BasePath);
-        g_bridgeWarmUpDone = true;
-        WriteLog("[user.cpp] WarmUp G5Bridge concluido.\n");
-    }
-    __except (1)
-    {
-        WriteLog("[user.cpp] EXCECAO durante WarmUp G5Bridge. Continuando sem warmup.\n");
-    }
+    // Phase25C: nao chamar codigo gerenciado pesado dentro de DLLOnLoad,
+    // DLLUpdateOnConnection ou process_message(load). Os logs da phase25B mostram
+    // reinicios duros exatamente entre "WarmUp iniciado" e "WarmUp concluido".
+    // A bridge sera carregada sob demanda na primeira dll$decisao real.
+    (void)source;
 }
 
 // =============================================================================
@@ -1425,9 +1636,9 @@ extern "C" __declspec(dllexport) double process_query(const char* pquery)
 // =============================================================================
 // STUBS DO OPENHOLDEM
 // =============================================================================
-void DLLOnLoad() { WarmUpBridgeIfPossible("DLLOnLoad"); } void DLLOnUnLoad() {}
+void DLLOnLoad() {} void DLLOnUnLoad() {}
 void __stdcall DLLUpdateOnNewFormula() {}
-void __stdcall DLLUpdateOnConnection() { WarmUpBridgeIfPossible("DLLUpdateOnConnection"); }
+void __stdcall DLLUpdateOnConnection() {}
 void __stdcall DLLUpdateOnHandreset() {}
 void __stdcall DLLUpdateOnNewRound() {}
 void __stdcall DLLUpdateOnMyTurn() {}
@@ -1440,13 +1651,28 @@ DLL_IMPLEMENTS double __stdcall ProcessQuery(const char* pquery)
 {
     if (!pquery) return 0;
 
-    if (strncmp(pquery, "dll$betsize", 11) == 0)
-        return (double)g_cachedByAmount / 100.0;
+    ScopedProcessLock processLock;
+
+    if (QueryMatches(pquery, "dll$brain_loaded"))
+        return 1.0;
 
     InitializeBridge();
     if (!g_bridgeLoaded) return 0;
     SendRuntimeConfigToBridge();
-    if (strncmp(pquery, "dll$decisao", 11) != 0) return 0;
+
+    if (strncmp(pquery, "dll$decisao", 11) != 0)
+    {
+        if (IsAutoplayerCachedQuery(pquery))
+        {
+            // G5cash phase25 chama dll$decisao dentro das funcoes f$betpot/f$betsize.
+            // A primeira consulta sincroniza a mao e preenche o cache; as demais apenas
+            // leem o cache para que o OpenHoldem execute o botao correto no seu fluxo nativo.
+            ProcessQuery("dll$decisao");
+            return EvaluateCachedAutoplayerQuery(pquery);
+        }
+
+        return 0.0;
+    }
 
     int heroChair = -1;
     int buttonChair = -1;
@@ -1469,18 +1695,30 @@ DLL_IMPLEMENTS double __stdcall ProcessQuery(const char* pquery)
     WriteLog("[user.cpp] == dll$decisao | %s | heroChair=%d btnChair=%d bb=%d ($%.2f) ==\n",
         StreetName(ohStreet), heroChair, buttonChair, bigBlind, bigBlind / 100.0);
 
-    bool isNewHand = !g_isHandActive
-        || (ohStreet == 1 && g_currentStreet > 1)
-        || (buttonChair != g_buttonChair && g_isHandActive);
+    bool isStreetResetToPreflop = (ohStreet == 1 && g_currentStreet > 1);
+    bool isButtonChangedMidHand = (g_isHandActive && buttonChair != g_buttonChair);
+    bool isNewHand = !g_isHandActive || isStreetResetToPreflop || isButtonChangedMidHand;
 
-    if (isNewHand) {
-        g_isHandActive = false;
-        g_cardsDealt = false;
-        g_currentStreet = 0;
+    if (isNewHand)
+    {
+        if (ohStreet != 1)
+        {
+            WriteLog("[user.cpp][CRITICO] Tentativa de iniciar/ressincronizar mao em %s "
+                     "(betround=%d) sem historico sequencial desde o preflop. "
+                     "Nao sera enviada street intermediaria ao G5. Aguardando proxima mao preflop.\n",
+                     StreetName(ohStreet), ohStreet);
+
+            ResetLocalHandSyncState();
+            return OPPL_BEEP;
+        }
+
+        ResetLocalHandSyncState();
+
         g_heroChair = heroChair;
         g_buttonChair = buttonChair;
 
-        if (!Step_InitNewHand(heroChair, buttonChair, bigBlind)) return 0.0;
+        if (!Step_InitNewHand(heroChair, buttonChair, bigBlind))
+            return OPPL_BEEP;
 
         g_isHandActive = true;
         g_currentStreet = 1;
@@ -1496,7 +1734,9 @@ DLL_IMPLEMENTS double __stdcall ProcessQuery(const char* pquery)
         }
     }
 
-Step_AdvanceStreetIfNeeded(ohStreet);
+if (!Step_AdvanceStreetIfNeeded(ohStreet))
+    return OPPL_BEEP;
+
 bool heroJustRegistered = Step_TryRegisterHeroAction();
 bool villainActed = Step_ProcessSegment(g_heroChair, ohStreet);
 
@@ -1712,3 +1952,5 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD ul_reason_for_call, LPVOID lpReserve
     }
     return TRUE;
 }
+
+

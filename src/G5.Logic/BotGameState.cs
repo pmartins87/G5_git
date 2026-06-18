@@ -9,7 +9,7 @@ using System.IO;
 using System.Reflection;
 
 
-// phase19: postflop sempre pela DecisionMaking.dll; sem bloqueio por complexidade.
+// phase25: saneamento estrutural, river multi-size EV e execucao por betbuttons.
 namespace G5.Logic
 {
     public class BotGameState : IDisposable
@@ -781,6 +781,35 @@ public string getPreFlopChartsInfo()
             return activePlayers;
         }
 
+        public bool CanIgnoreResidualActionAfterClosedRound(int incomingPlayerInd)
+        {
+            if (_playerToActInd >= 0)
+                return false;
+
+            if (incomingPlayerInd < 0 || incomingPlayerInd >= _players.Count)
+                return false;
+
+            if (incomingPlayerInd == _heroInd)
+                return false;
+
+            int maxMoneyInPot = getMaxMoneyInThePot();
+            int activeNonAllIn = 0;
+
+            foreach (var player in _players)
+            {
+                if (player.StatusInHand == Status.Folded || player.StatusInHand == Status.AllIn)
+                    continue;
+
+                activeNonAllIn++;
+
+                if (player.MoneyInPot < maxMoneyInPot)
+                    return false;
+            }
+
+            return activeNonAllIn <= 1 || maxMoneyInPot >= 0;
+        }
+
+
         private float getPossibleWinnings(int bigBlindSize)
         {
             int winnings = 0;
@@ -1178,6 +1207,11 @@ public string getPreFlopChartsInfo()
             public string message;
             public bool usedMultiSizeEV;
             public string sizingReport;
+            public bool usedPreFlopChart;
+            public float chartFoldProb;
+            public float chartCallProb;
+            public float chartRaiseProb;
+            public float chartAllInProb;
         }
 
         private static bool IsAtLeastAllInCommitmentThreshold(int intendedAmount, int stack)
@@ -1248,7 +1282,7 @@ public string getPreFlopChartsInfo()
         }
 
 
-        private float calculateBoardWetnessForSizing()
+                private float calculateBoardWetnessForSizing()
         {
             if (_board == null || _board.Count < 3)
                 return 0.0f;
@@ -1277,8 +1311,11 @@ public string getPreFlopChartsInfo()
 
             bool paired = rankCount.Any(x => x >= 2);
             int maxSuit = suitCount.Max();
-            bool twoTone = maxSuit == 2;
-            bool monotone = maxSuit >= 3;
+            bool flopMonotone = _board.Count == 3 && maxSuit == 3;
+            bool boardMonotone = _board.Count >= 3 && maxSuit == _board.Count;
+            bool flushCompleted = maxSuit >= 3;
+            bool fourFlush = maxSuit >= 4;
+            bool twoToneFlop = _board.Count == 3 && maxSuit == 2;
 
             int bestStraightWindow = 0;
             for (int high = 14; high >= 5; high--)
@@ -1296,12 +1333,18 @@ public string getPreFlopChartsInfo()
 
             float wetness = 0.0f;
 
-            if (monotone)
+            if (boardMonotone || flopMonotone)
                 wetness += 0.35f;
-            else if (twoTone)
+            else if (fourFlush)
+                wetness += 0.40f;
+            else if (flushCompleted)
+                wetness += 0.30f;
+            else if (twoToneFlop)
                 wetness += 0.18f;
 
-            if (bestStraightWindow >= 3)
+            if (bestStraightWindow >= 4)
+                wetness += 0.35f;
+            else if (bestStraightWindow >= 3)
                 wetness += 0.25f;
 
             if (paired)
@@ -1912,174 +1955,49 @@ private bool heroHasStraightDrawOnFlop()
         
 
 
-        private bool tryEvaluatePostFlopMultiSizeEV(ref BotDecision bd)
+                private int clampCandidateBetAmount(int amount)
         {
-            // Fase canonical-tree: o avaliador multi-size fica explicitamente depreciado.
-            // A arvore calcula apenas a acao abstrata Bet/Raise usando o size canonico nativo
-            // de DecisionMaking.GameState.getRaiseAmount(). O size real e definido depois,
-            // pela ExecutionSizingPolicy, sem reavaliar EV para tamanhos alternativos.
-            return false;
+            if (amount <= 0)
+                return 0;
+
+            return clampBetAmount(amount);
         }
 
-        private static string fmtPts(int value)
-        {
-            return value.ToString();
-        }
-
-        private string describeBoardForDiagnostics()
-        {
-            if (_board == null || _board.Count == 0)
-                return "sem board";
-
-            return _board.ToString();
-        }
-
-        private string describeHeroHandForDiagnostics()
-        {
-            try
-            {
-                if (_street == Street.PreFlop)
-                    return _heroHoleCards.ToString();
-
-                var hs = HandStrength.calculateHandStrength(_heroHoleCards, _board);
-                return $"{_heroHoleCards} / {hs.rank}";
-            }
-            catch
-            {
-                return _heroHoleCards == null ? "?" : _heroHoleCards.ToString();
-            }
-        }
-
-        private string describeBoardTextureForDiagnostics()
-        {
-            if (_board == null || _board.Count < 3)
-                return "nao aplicavel";
-
-            int[] rankCount = new int[15];
-            int[] suitCount = new int[4];
-            bool[] ranks = new bool[15];
-
-            foreach (var card in _board.Cards)
-            {
-                int r = (int)card.rank;
-                int s = (int)card.suit;
-
-                if (r >= 2 && r <= 14)
-                {
-                    rankCount[r]++;
-                    ranks[r] = true;
-
-                    if (r == 14)
-                        ranks[1] = true;
-                }
-
-                if (s >= 0 && s < 4)
-                    suitCount[s]++;
-            }
-
-            bool paired = rankCount.Any(x => x >= 2);
-            int maxSuit = suitCount.Max();
-            bool twoTone = maxSuit == 2;
-            bool monotone = maxSuit >= 3;
-
-            int bestStraightWindow = 0;
-            for (int high = 14; high >= 5; high--)
-            {
-                int count = 0;
-                for (int r = high - 4; r <= high; r++)
-                {
-                    if (ranks[r])
-                        count++;
-                }
-
-                if (count > bestStraightWindow)
-                    bestStraightWindow = count;
-            }
-
-            float wetness = calculateBoardWetnessForSizing();
-            string flushTexture = monotone ? "monotone" : (twoTone ? "two-tone" : "rainbow/seco de naipe");
-            string pairTexture = paired ? "pareado" : "nao pareado";
-            string straightTexture = bestStraightWindow >= 4 ? "muito conectado" : (bestStraightWindow >= 3 ? "conectado" : "pouco conectado");
-
-            return $"{flushTexture}, {pairTexture}, {straightTexture}, wetness={wetness:F2}";
-        }
-
-public string getOpponentRangesDiagnostics(bool mostrarRangesCompletos = false, int topN = 5)
-{
-    StringBuilder sb = new StringBuilder();
-
-    for (int i = 0; i < _players.Count; i++)
-    {
-        if (i == _heroInd)
-            continue;
-
-        var player = _players[i];
-
-        if (player.StatusInHand == Status.Folded)
-            continue;
-
-        if (sb.Length > 0)
-            sb.Append(" | ");
-
-        sb.Append($"{player.Name}/{player.PreFlopPosition}: ");
-        sb.Append($"status={player.StatusInHand}, ");
-        sb.Append($"stack={fmtPts(player.Stack)}, ");
-        sb.Append($"inPot={fmtPts(player.MoneyInPot)}, ");
-        sb.Append(player.Range.DiagnosticSummary(topN, mostrarRangesCompletos));
-    }
-
-    if (sb.Length == 0)
-        return "sem viloes ativos";
-
-    return sb.ToString();
-}
-
-private string describeOpponentRangesForDiagnostics()
-{
-    return getOpponentRangesDiagnostics(false, 5);
-}
-
-        private void appendAcademicDecisionDiagnostics(ref BotDecision bd, int amountToCallAtDecisionStart, int nOfOpponents)
+        private IEnumerable<int> getRiverNoFacingBetCandidateAmounts()
         {
             int pot = potSize();
-            int heroStack = getHero().Stack;
-            int heroInPot = getHero().MoneyInPot;
-            int maxInPot = getMaxMoneyInThePot();
-            int activePlayers = numActivePlayers();
-            int activeNonAllIn = numActiveNonAllInPlayers();
+            int stack = getHero().Stack;
 
-            float spr = heroStack / (float)Math.Max(1, pot);
-            float potOdds = 0.0f;
+            if (pot <= 0 || stack <= 0)
+                yield break;
 
-            if (amountToCallAtDecisionStart > 0)
-                potOdds = amountToCallAtDecisionStart / (float)Math.Max(1, pot + amountToCallAtDecisionStart);
+            float[] fractions = new float[] { 0.25f, 0.333f, 0.50f, 0.667f, 1.00f };
+            HashSet<int> emitted = new HashSet<int>();
 
-            float edge = bd.betRaiseEV - bd.checkCallEV;
-            float selectedInvestment = bd.byAmount;
-            float selectedCommitment = heroStack > 0 ? selectedInvestment / Math.Max(1.0f, heroStack) : 0.0f;
-
-            StringBuilder diag = new StringBuilder();
-            diag.AppendLine();
-            diag.AppendLine("[Diagnostico academico da decisao]");
-            diag.AppendLine($"street={_street}, board={describeBoardForDiagnostics()}, hero={describeHeroHandForDiagnostics()}");
-            diag.AppendLine($"jogadores: ativos={activePlayers}, oponentes={nOfOpponents}, nonAllIn={activeNonAllIn}, heroPos={getHero().PreFlopPosition}, heroInPosition={isPlayerInPosition(_heroInd)}");
-            diag.AppendLine($"pote={fmtPts(pot)}, maxInPot={fmtPts(maxInPot)}, heroInPot={fmtPts(heroInPot)}, stackHero={fmtPts(heroStack)}, amountToCall={fmtPts(amountToCallAtDecisionStart)}, SPR={spr:F2}, potOddsCall={potOdds:P1}");
-            diag.AppendLine($"EV liquido: check/call={bd.checkCallEV:F3}, bet/raise={bd.betRaiseEV:F3}, edgeBR-CC={edge:F3}");
-            diag.AppendLine($"acaoEscolhida={bd.actionType}, byAmount={fmtPts(bd.byAmount)}, commitmentEscolhido={selectedCommitment:P1}, multiSizeEV={bd.usedMultiSizeEV}");
-
-if (_street > Street.PreFlop)
-    diag.AppendLine($"texturaBoard={describeBoardTextureForDiagnostics()}");
-
-diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
-
-            if (!string.IsNullOrWhiteSpace(bd.sizingReport))
+            foreach (float fraction in fractions)
             {
-                diag.AppendLine("resumoSizingEV:");
-                diag.Append(bd.sizingReport.TrimEnd());
-                diag.AppendLine();
+                int amount = clampCandidateBetAmount((int)Math.Round(pot * fraction));
+                if (amount > 0 && emitted.Add(amount))
+                    yield return amount;
             }
 
-            bd.message += diag.ToString();
+            float spr = SafeRatio(stack, Math.Max(1, pot));
+            if (spr <= 1.50f)
+            {
+                int allInAmount = clampCandidateBetAmount(stack);
+                if (allInAmount > 0 && emitted.Add(allInAmount))
+                    yield return allInAmount;
+            }
+        }
+
+        private bool tryEvaluatePostFlopMultiSizeEV(ref BotDecision bd)
+        {
+            // PHASE25D REGRESSION FIX
+            // O avaliador multi-size dependia da rota nativa EstimateEVForBetRaiseAmount.
+            // Essa rota foi removida do caminho de execucao porque introduziu uma segunda
+            // fronteira P/Invoke e estado global nativo de root sizing. A escolha de tamanho
+            // permanece em calculatePostFlopBetRaiseAmount(), depois do EV canonico.
+            return false;
         }
 
         private bool tryCalculateHeroPreFlopChartActionFast(int amountToCall, DateTime startTime, out BotDecision bd)
@@ -2093,7 +2011,12 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
                 timeSpentSeconds = 0,
                 message = "",
                 usedMultiSizeEV = false,
-                sizingReport = ""
+                sizingReport = "",
+                usedPreFlopChart = false,
+                chartFoldProb = 0.0f,
+                chartCallProb = 0.0f,
+                chartRaiseProb = 0.0f,
+                chartAllInProb = 0.0f
             };
 
             if (_street != Street.PreFlop)
@@ -2111,9 +2034,24 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
             var villainPos = (_bettors.Count > 0) ? _bettors.Last() : Position.Empty;
 
             bd.actionType = pfcActionDistribution.sample(_rng);
+            bd.usedPreFlopChart = true;
 
-            // Fast path: a chart Ã© a polÃ­tica preflop. Estes campos sÃ£o scores
-            // informativos da chart; nÃ£o disparam DecisionMaking.EstimateEV.
+            float chartFoldProb = 1.0f
+                - pfcActionDistribution.allinProb
+                - pfcActionDistribution.brProb
+                - pfcActionDistribution.ccProb;
+
+            if (chartFoldProb < 0.0f)
+                chartFoldProb = 0.0f;
+
+            bd.chartFoldProb = chartFoldProb;
+            bd.chartCallProb = pfcActionDistribution.ccProb;
+            bd.chartRaiseProb = pfcActionDistribution.brProb;
+            bd.chartAllInProb = pfcActionDistribution.allinProb;
+
+            // Estes campos continuam preenchidos apenas como compatibilidade com
+            // DecisionResult, mas o log da bridge passa a identifica-los como
+            // ChartScore, nao como EV da DecisionMaking.dll.
             bd.checkCallEV = pfcActionDistribution.ccProb;
             bd.betRaiseEV = pfcActionDistribution.brProb + pfcActionDistribution.allinProb;
 
@@ -2121,7 +2059,7 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
             bd.message += $" -> Chart situation: Hero pos {heroPos}, villainPos {villainPos}, num bets {_numBets}, num callers {_numCallers}.\n";
             bd.message += $" -> Preflop chart set: {getPreFlopChartsInfo()}.\n";
             bd.message += $" -> Chart lookup: {_preFlopCharts.LastLookupInfo}.\n";
-            bd.message += $" -> Chart AD: allin={pfcActionDistribution.allinProb:F3}, br={pfcActionDistribution.brProb:F3}, cc={pfcActionDistribution.ccProb:F3}.\n";
+            bd.message += $" -> Chart frequencies: fold={chartFoldProb:F3}, call={pfcActionDistribution.ccProb:F3}, raise={pfcActionDistribution.brProb:F3}, allin={pfcActionDistribution.allinProb:F3}.\n";
             bd.message += $" -> Sampled action is {bd.actionType}.\n";
 
             if (bd.actionType == ActionType.Fold)
@@ -2175,7 +2113,110 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
             return true;
         }
 
-        public BotDecision calculateHeroAction()
+
+
+        public string getOpponentRangesDiagnostics(bool mostrarRangesCompletos = false, int topN = 5)
+        {
+            try
+            {
+                if (_players == null || _players.Count == 0)
+                    return "sem players";
+
+                StringBuilder sb = new StringBuilder();
+
+                for (int i = 0; i < _players.Count; i++)
+                {
+                    if (i == _heroInd)
+                        continue;
+
+                    Player player = _players[i];
+
+                    if (player == null)
+                        continue;
+
+                    if (player.StatusInHand == Status.Folded)
+                        continue;
+
+                    if (sb.Length > 0)
+                        sb.Append(" | ");
+
+                    sb.Append($"{player.Name}/{player.PreFlopPosition}: ");
+                    sb.Append($"status={player.StatusInHand}, ");
+                    sb.Append($"stack={player.Stack}, ");
+                    sb.Append($"inPot={player.MoneyInPot}, ");
+
+                    if (player.Range != null)
+                        sb.Append(player.Range.DiagnosticSummary(topN, mostrarRangesCompletos));
+                    else
+                        sb.Append("range=null");
+                }
+
+                if (sb.Length == 0)
+                    return "sem viloes ativos";
+
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                return $"diagnostico de ranges indisponivel: {ex.GetType().Name}";
+            }
+        }
+
+        private void appendAcademicDecisionDiagnostics(ref BotDecision bd, int amountToCallAtDecisionStart, int nOfOpponents)
+        {
+            try
+            {
+                int pot = potSize();
+                int heroStack = 0;
+                int heroInPot = 0;
+
+                if (_players != null && _heroInd >= 0 && _heroInd < _players.Count)
+                {
+                    heroStack = _players[_heroInd].Stack;
+                    heroInPot = _players[_heroInd].MoneyInPot;
+                }
+
+                int maxInPot = getMaxMoneyInThePot();
+                int activePlayers = numActivePlayers();
+                int activeNonAllIn = numActiveNonAllInPlayers();
+
+                float spr = heroStack / (float)Math.Max(1, pot);
+                float potOdds = 0.0f;
+
+                if (amountToCallAtDecisionStart > 0)
+                    potOdds = amountToCallAtDecisionStart / (float)Math.Max(1, pot + amountToCallAtDecisionStart);
+
+                float edge = bd.betRaiseEV - bd.checkCallEV;
+                float selectedInvestment = bd.byAmount;
+                float selectedCommitment = heroStack > 0 ? selectedInvestment / Math.Max(1.0f, heroStack) : 0.0f;
+
+                StringBuilder diag = new StringBuilder();
+                diag.AppendLine();
+                diag.AppendLine("[Diagnostico academico da decisao]");
+                diag.AppendLine($"street={_street}, jogadoresAtivos={activePlayers}, oponentes={nOfOpponents}, nonAllIn={activeNonAllIn}");
+                diag.AppendLine($"pote={pot}, maxInPot={maxInPot}, heroInPot={heroInPot}, stackHero={heroStack}, amountToCall={amountToCallAtDecisionStart}, SPR={spr:F2}, potOddsCall={potOdds:P1}");
+                diag.AppendLine($"EV liquido: check/call={bd.checkCallEV:F3}, bet/raise={bd.betRaiseEV:F3}, edgeBR-CC={edge:F3}");
+                diag.AppendLine($"acaoEscolhida={bd.actionType}, byAmount={bd.byAmount}, commitmentEscolhido={selectedCommitment:P1}, multiSizeEV={bd.usedMultiSizeEV}");
+
+                if (bd.usedPreFlopChart)
+                    diag.AppendLine($"chartFrequencies: fold={bd.chartFoldProb:F3}, call={bd.chartCallProb:F3}, raise={bd.chartRaiseProb:F3}, allin={bd.chartAllInProb:F3}");
+
+                if (!string.IsNullOrWhiteSpace(bd.sizingReport))
+                {
+                    diag.AppendLine("resumoSizingEV:");
+                    diag.Append(bd.sizingReport.TrimEnd());
+                    diag.AppendLine();
+                }
+
+                bd.message += diag.ToString();
+            }
+            catch (Exception ex)
+            {
+                bd.message += $"\n[Diagnostico academico indisponivel: {ex.GetType().Name}]\n";
+            }
+        }
+
+                public BotDecision calculateHeroAction()
         {
             int nOfOpponents = numActivePlayers() - 1;
 
@@ -2188,7 +2229,12 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
                 timeSpentSeconds = 0,
                 message = "",
                 usedMultiSizeEV = false,
-                sizingReport = ""
+                sizingReport = "",
+                usedPreFlopChart = false,
+                chartFoldProb = 0.0f,
+                chartCallProb = 0.0f,
+                chartRaiseProb = 0.0f,
+                chartAllInProb = 0.0f
             };
 
             if (_playerToActInd != _heroInd)
@@ -2202,6 +2248,7 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
             {
                 bd.message = "Number of opponents is 0";
                 bd.actionType = ActionType.Check;
+                bd.byAmount = 0;
                 return bd;
             }
 
@@ -2221,24 +2268,20 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
 
             if (isPostFlop)
             {
-                int rootBetRaiseAmount = canBetRaise ? calculatePostFlopBetRaiseAmount(0.0f, 1.0f) : 0;
-                Estimators.IBetRaiseAmountEstimator amountEstimator = _actionEstimator as Estimators.IBetRaiseAmountEstimator;
-
-                if (amountEstimator != null && rootBetRaiseAmount > 0)
-                {
-                    amountEstimator.estimateEVForBetRaiseAmount(
-                        out bd.checkCallEV,
-                        out bd.betRaiseEV,
-                        this,
-                        rootBetRaiseAmount);
-
-                    bd.message += $" -> FullTreePostFlop: DecisionMaking.dll chamada via EstimateEVForBetRaiseAmount; sizeRaizExecucao={rootBetRaiseAmount}; decisao pos-flop exclusiva pela arvore. {_lastExecutionSizingReason}\n";
-                }
-                else
-                {
-                    _actionEstimator.estimateEV(out bd.checkCallEV, out bd.betRaiseEV, this);
-                    bd.message += " -> FullTreePostFlop: DecisionMaking.dll chamada via EstimateEV; decisao pos-flop exclusiva pela arvore.\n";
-                }
+                // PHASE25D REGRESSION FIX
+                // A fase25/25B introduziu uma segunda entrada nativa para EV pos-flop:
+                // EstimateEVForBetRaiseAmount. Ela forçava o primeiro tamanho de bet/raise
+                // dentro da DecisionMaking.dll antes de calcular o EV.
+                //
+                // Esse desenho quebrou a equivalencia com a arquitetura original estavel:
+                // BotGameState -> IActionEstimator.estimateEV -> DecisionMakingDll.Holdem_EstimateEV
+                // -> export nativo EstimateEV.
+                //
+                // A sizing policy continua existindo, mas volta para o lugar seguro:
+                // primeiro calcula o EV pela arvore canonica; depois escolhe o tamanho
+                // de execucao apenas se a acao escolhida for bet/raise.
+                _actionEstimator.estimateEV(out bd.checkCallEV, out bd.betRaiseEV, this);
+                bd.message += " -> FullTreePostFlop: DecisionMaking.dll chamada via EstimateEV canonico; sizing decidido apenas apos o EV, sem EstimateEVForBetRaiseAmount e sem estado global nativo de root size.\n";
 
                 if (float.IsNaN(bd.checkCallEV) || float.IsInfinity(bd.checkCallEV) ||
                     float.IsNaN(bd.betRaiseEV) || float.IsInfinity(bd.betRaiseEV))
@@ -2247,7 +2290,9 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
                         $"FullTreePostFlop: DecisionMaking.dll retornou EV invalido: cc={bd.checkCallEV}, br={bd.betRaiseEV}.");
                 }
 
-                bd.message += $" -> FullTreePostFlop: caminho pos-flop exclusivo da arvore; nenhum avaliador bounded e nenhum bloqueio por complexidade; street={_street}, oponentes={nOfOpponents}, amountToCall={amountToCall}, canBetRaise={canBetRaise}, rootBetRaiseAmount={rootBetRaiseAmount}.\n";
+                int rootBetRaiseAmount = canBetRaise ? calculatePostFlopBetRaiseAmount(bd.checkCallEV, bd.betRaiseEV) : 0;
+
+                bd.message += $" -> FullTreePostFlop: caminho pos-flop pela arvore canonica; street={_street}, oponentes={nOfOpponents}, amountToCall={amountToCall}, canBetRaise={canBetRaise}, rootBetRaiseAmountExecucao={rootBetRaiseAmount}. {_lastExecutionSizingReason}\n";
 
                 if (amountToCall > 0)
                 {
@@ -2286,7 +2331,8 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
                     }
                 }
 
-                if (IsAtLeastAllInCommitmentThreshold(bd.byAmount, _players[_heroInd].Stack))
+                if ((bd.actionType == ActionType.Bet || bd.actionType == ActionType.Raise) &&
+                    IsAtLeastAllInCommitmentThreshold(bd.byAmount, _players[_heroInd].Stack))
                 {
                     bd.message += $" -> Amount escolhido atingiu {_allInCommitmentPercent}% do stack restante; convertendo para AllIn por regra de commitment configurada no G5.\n";
                     bd.byAmount = _players[_heroInd].Stack;
@@ -2329,7 +2375,12 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
                 {
                     bd.message += " -> But amount to call is 0 so check.\n";
                     bd.actionType = ActionType.Check;
+                    bd.byAmount = 0;
                 }
+            }
+            else if (bd.actionType == ActionType.Check)
+            {
+                bd.byAmount = 0;
             }
             else if (bd.actionType == ActionType.Call)
             {
@@ -2339,14 +2390,20 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
                 {
                     bd.message += " -> AmountToCall is 0 -> check.\n";
                     bd.actionType = ActionType.Check;
+                    bd.byAmount = 0;
                 }
             }
-            else
+            else if (bd.actionType == ActionType.Bet || bd.actionType == ActionType.Raise)
             {
                 bd.byAmount = getRaiseAmount();
             }
+            else if (bd.actionType == ActionType.AllIn)
+            {
+                bd.byAmount = _players[_heroInd].Stack;
+            }
 
-            if (IsAtLeastAllInCommitmentThreshold(bd.byAmount, _players[_heroInd].Stack))
+            if ((bd.actionType == ActionType.Bet || bd.actionType == ActionType.Raise) &&
+                IsAtLeastAllInCommitmentThreshold(bd.byAmount, _players[_heroInd].Stack))
             {
                 bd.message += $" -> But amount to put in pot is at least {_allInCommitmentPercent}% of player's stack, so go all in!\n";
                 bd.byAmount = _players[_heroInd].Stack;
@@ -2364,6 +2421,4 @@ diag.AppendLine($"rangesViloes={describeOpponentRangesForDiagnostics()}");
         }
     }
 }
-
-
 

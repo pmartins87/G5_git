@@ -2,6 +2,7 @@
 using System.Runtime.InteropServices;
 using System.Diagnostics;
 using System;
+using System.IO;
 
 
 namespace G5.Logic
@@ -9,6 +10,60 @@ namespace G5.Logic
     public class DecisionMakingDll
     {
         private const int N_HOLECARDS = 52 * 51 / 2;
+        private static readonly object Phase24TraceLock = new object();
+        private const string Phase24TracePath = @"C:\G5Pressure\DecisionMakingDll_phase24_trace.log";
+
+        private static void Phase24Trace(string message)
+        {
+            try
+            {
+                Directory.CreateDirectory(@"C:\G5Pressure");
+                string line = $"[{DateTime.Now:HH:mm:ss.fff}] pid={Process.GetCurrentProcess().Id} {message}{Environment.NewLine}";
+
+                lock (Phase24TraceLock)
+                {
+                    File.AppendAllText(Phase24TracePath, line);
+                }
+            }
+            catch
+            {
+                // Diagnostico nao pode interferir na chamada nativa.
+            }
+        }
+
+        private static string CardsSummary(Unmanaged_Card[] cards, Street street)
+        {
+            if (cards == null)
+                return "<null>";
+
+            int count = 0;
+            if (street == Street.Flop) count = 3;
+            else if (street == Street.Turn) count = 4;
+            else if (street == Street.River) count = 5;
+
+            if (count <= 0)
+                return "<preflop>";
+
+            var parts = new List<string>();
+            for (int i = 0; i < count && i < cards.Length; i++)
+                parts.Add($"#{i}:r{cards[i].rank}s{cards[i].suit}v{cards[i].value}");
+
+            return string.Join(" ", parts);
+        }
+
+        private static string PlayersSummary(Unmanaged_Player[] players)
+        {
+            if (players == null)
+                return "<null>";
+
+            var parts = new List<string>();
+            for (int i = 0; i < players.Length; i++)
+            {
+                parts.Add($"p{i}:st={players[i].statusInHand},last={players[i].lastAction},prev={players[i].prevStreetAction},stack={players[i].stack},pot={players[i].moneyInPot},range={players[i].range.length},modelN={players[i].model.totalPlayers}");
+            }
+
+            return string.Join(" | ", parts);
+        }
 
         private struct Unmanaged_Range
         {
@@ -281,12 +336,6 @@ namespace G5.Logic
             [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)]Unmanaged_Card[] board,
             int street, int numBets, int numCallers, int bigBlindSize, IntPtr gc);
 
-        [DllImport("DecisionMaking.dll", EntryPoint = "EstimateEVForBetRaiseAmount", CharSet = CharSet.Ansi)]
-        private static extern void EstimateEVForBetRaiseAmount(ref float checkCallEV, ref float betRaiseEV, int forcedBetRaiseAmount, int buttonInd, int heroIndex, ref Unmanaged_HoleCards heroHoleCards,
-            [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)]Unmanaged_Player[] players, int nPlayers,
-            [In, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)]Unmanaged_Card[] board,
-            int street, int numBets, int numCallers, int bigBlindSize, IntPtr gc);
-
         public static void Holdem_EstimateEV(out float checkCallEV, out float betRaiseEV, int buttonInd, int heroIndex, HoleCards heroHoleCards,
             List<Player> playerList, Board board, Street street, int numBets, int numCallers, int bigBlindSize, DecisionMakingContext dmContext)
         {
@@ -297,22 +346,21 @@ namespace G5.Logic
             checkCallEV = 0.0f;
             betRaiseEV = 0.0f;
 
+            Stopwatch sw = Stopwatch.StartNew();
+            Phase24Trace($"[PInvoke EstimateEV BEGIN] street={street} button={buttonInd} hero={heroIndex} nPlayers={playerList.Count} numBets={numBets} numCallers={numCallers} bb={bigBlindSize} board={CardsSummary(cards, street)} players={PlayersSummary(players)} gc=0x{dmContext.GC.ToInt64():X}");
+
             EstimateEV(ref checkCallEV, ref betRaiseEV, buttonInd, heroIndex, ref uHoleCards, players, playerList.Count, cards,
                 (int)street, numBets, numCallers, bigBlindSize, dmContext.GC);
+
+            sw.Stop();
+            Phase24Trace($"[PInvoke EstimateEV END] street={street} cc={checkCallEV:F6} br={betRaiseEV:F6} elapsedMs={sw.Elapsed.TotalMilliseconds:F2}");
         }
 
-        public static void Holdem_EstimateEVForBetRaiseAmount(out float checkCallEV, out float betRaiseEV, int forcedBetRaiseAmount, int buttonInd, int heroIndex, HoleCards heroHoleCards,
-            List<Player> playerList, Board board, Street street, int numBets, int numCallers, int bigBlindSize, DecisionMakingContext dmContext)
-        {
-            Unmanaged_HoleCards uHoleCards = new Unmanaged_HoleCards(heroHoleCards);
-            Unmanaged_Player[] players = PlayersToUnmanaged(playerList);
-            Unmanaged_Card[] cards = BoardToUnmanaged(board);
-
-            checkCallEV = 0.0f;
-            betRaiseEV = 0.0f;
-
-            EstimateEVForBetRaiseAmount(ref checkCallEV, ref betRaiseEV, forcedBetRaiseAmount, buttonInd, heroIndex, ref uHoleCards, players, playerList.Count, cards,
-                (int)street, numBets, numCallers, bigBlindSize, dmContext.GC);
-        }
     }
 }
+
+
+
+
+
+
